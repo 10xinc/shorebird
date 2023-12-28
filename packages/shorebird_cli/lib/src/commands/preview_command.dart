@@ -131,7 +131,7 @@ class PreviewCommand extends ShorebirdCommand {
 
     final ReleasePlatform releasePlatform;
     if (availablePlatforms.length == 1) {
-      releasePlatform = release.activePlatforms.first;
+      releasePlatform = availablePlatforms.first;
     } else if (results['platform'] != null) {
       releasePlatform =
           ReleasePlatform.values.byName(results['platform'] as String);
@@ -373,7 +373,7 @@ class PreviewCommand extends ShorebirdCommand {
       final int installExitCode;
       if (shouldUseDeviceCtl) {
         logger.detail(
-          'Using devicectl to install and launch on device $deviceId.',
+          '''Using devicectl to install and launch on device ${deviceForLaunch.udid}.''',
         );
         installExitCode = await devicectl.installAndLaunchApp(
           runnerAppDirectory: runnerDirectory,
