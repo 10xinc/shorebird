@@ -4,9 +4,9 @@ import 'package:mocktail/mocktail.dart';
 import 'package:scoped/scoped.dart';
 import 'package:shorebird_cli/src/cache.dart';
 import 'package:shorebird_cli/src/executables/executables.dart';
-import 'package:shorebird_cli/src/process.dart';
 import 'package:shorebird_cli/src/shorebird_artifacts.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
+import 'package:shorebird_cli/src/shorebird_process.dart';
 import 'package:test/test.dart';
 
 import '../mocks.dart';
@@ -88,8 +88,8 @@ void main() {
         );
       });
 
-      group('when using cached aot tools', () {
-        const aotToolsPath = 'aot-tools';
+      group('when aot-tools is a kernel file', () {
+        const aotToolsPath = 'aot_tools.dill';
 
         setUp(() {
           when(
@@ -99,7 +99,7 @@ void main() {
           ).thenReturn(aotToolsPath);
         });
 
-        test('completes when linking exits with code 0', () async {
+        test('links and exits with code 0', () async {
           when(
             () => process.run(
               any(),
@@ -126,8 +126,9 @@ void main() {
           );
           verify(
             () => process.run(
-              any(that: endsWith('aot-tools')),
+              dartBinaryFile.path,
               [
+                aotToolsPath,
                 'link',
                 '--base=$base',
                 '--patch=$patch',
@@ -139,7 +140,7 @@ void main() {
         });
       });
 
-      group('when using local aot_tools', () {
+      group('when aot_tools is a dart file', () {
         const aotToolsPath = 'aot_tools.dart';
 
         setUp(() {
@@ -150,7 +151,7 @@ void main() {
           ).thenReturn(aotToolsPath);
         });
 
-        test('completes when linking exits with code 0', () async {
+        test('links and exits with code 0', () async {
           when(
             () => process.run(
               any(),

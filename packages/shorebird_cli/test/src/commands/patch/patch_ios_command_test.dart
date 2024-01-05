@@ -16,15 +16,16 @@ import 'package:shorebird_cli/src/commands/patch/patch.dart';
 import 'package:shorebird_cli/src/config/config.dart';
 import 'package:shorebird_cli/src/deployment_track.dart';
 import 'package:shorebird_cli/src/doctor.dart';
+import 'package:shorebird_cli/src/engine_config.dart';
 import 'package:shorebird_cli/src/executables/aot_tools.dart';
 import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/os/operating_system_interface.dart';
 import 'package:shorebird_cli/src/patch_diff_checker.dart';
 import 'package:shorebird_cli/src/platform.dart';
-import 'package:shorebird_cli/src/process.dart';
 import 'package:shorebird_cli/src/shorebird_artifacts.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 import 'package:shorebird_cli/src/shorebird_flutter.dart';
+import 'package:shorebird_cli/src/shorebird_process.dart';
 import 'package:shorebird_cli/src/shorebird_validator.dart';
 import 'package:shorebird_cli/src/third_party/flutter_tools/lib/flutter_tools.dart';
 import 'package:shorebird_cli/src/validators/validators.dart';
@@ -701,7 +702,8 @@ Please re-run the release command for this version or create a new release.'''),
       // Verify that we switch back to the original revision once we're done.
       verifyInOrder([
         () => shorebirdFlutter.useRevision(
-            revision: preLinkerRelease.flutterRevision),
+              revision: preLinkerRelease.flutterRevision,
+            ),
         () => shorebirdFlutter.useRevision(revision: otherRevision),
       ]);
 

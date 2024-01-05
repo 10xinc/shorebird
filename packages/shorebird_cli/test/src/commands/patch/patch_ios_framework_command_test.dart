@@ -14,14 +14,15 @@ import 'package:shorebird_cli/src/commands/patch/patch.dart';
 import 'package:shorebird_cli/src/config/config.dart';
 import 'package:shorebird_cli/src/deployment_track.dart';
 import 'package:shorebird_cli/src/doctor.dart';
+import 'package:shorebird_cli/src/engine_config.dart';
 import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/os/operating_system_interface.dart';
 import 'package:shorebird_cli/src/patch_diff_checker.dart';
 import 'package:shorebird_cli/src/platform.dart';
-import 'package:shorebird_cli/src/process.dart';
 import 'package:shorebird_cli/src/shorebird_artifacts.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 import 'package:shorebird_cli/src/shorebird_flutter.dart';
+import 'package:shorebird_cli/src/shorebird_process.dart';
 import 'package:shorebird_cli/src/shorebird_validator.dart';
 import 'package:shorebird_cli/src/validators/validators.dart';
 import 'package:shorebird_code_push_client/shorebird_code_push_client.dart';
@@ -83,6 +84,7 @@ flutter:
     late Directory shorebirdRoot;
     late Directory projectRoot;
     late Directory flutterDirectory;
+    late EngineConfig engineConfig;
     late File genSnapshotFile;
     late ShorebirdArtifacts shorebirdArtifacts;
     late Doctor doctor;
@@ -111,6 +113,7 @@ flutter:
           authRef.overrideWith(() => auth),
           codePushClientWrapperRef.overrideWith(() => codePushClientWrapper),
           doctorRef.overrideWith(() => doctor),
+          engineConfigRef.overrideWith(() => engineConfig),
           shorebirdArtifactsRef.overrideWith(() => shorebirdArtifacts),
           loggerRef.overrideWith(() => logger),
           osInterfaceRef.overrideWith(() => operatingSystemInterface),
@@ -179,6 +182,7 @@ flutter:
       artifactManager = MockArtifactManager();
       codePushClientWrapper = MockCodePushClientWrapper();
       doctor = MockDoctor();
+      engineConfig = const EngineConfig.empty();
       shorebirdArtifacts = MockShorebirdArtifacts();
       patchDiffChecker = MockPatchDiffChecker();
       platform = MockPlatform();

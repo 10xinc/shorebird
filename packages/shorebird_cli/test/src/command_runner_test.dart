@@ -6,9 +6,9 @@ import 'package:scoped/scoped.dart';
 import 'package:shorebird_cli/src/command_runner.dart';
 import 'package:shorebird_cli/src/logger.dart' hide logger;
 import 'package:shorebird_cli/src/platform.dart';
-import 'package:shorebird_cli/src/process.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 import 'package:shorebird_cli/src/shorebird_flutter.dart';
+import 'package:shorebird_cli/src/shorebird_process.dart';
 import 'package:shorebird_cli/src/shorebird_version.dart';
 import 'package:shorebird_cli/src/version.dart';
 import 'package:test/test.dart';
@@ -233,6 +233,44 @@ Run ${lightCyan.wrap('shorebird upgrade')} to upgrade.'''),
           () => commandRunner.run(['--verbose']),
         );
         expect(result, equals(ExitCode.success.code));
+      });
+    });
+
+    group('local engine', () {
+      group('when all local engine args are provided', () {
+        test('creates engine config with arguments', () async {
+          final result = await runWithOverrides(
+            () => commandRunner.run([
+              '--local-engine',
+              'foo',
+              '--local-engine-src-path',
+              'bar',
+              '--local-engine-host',
+              'baz',
+            ]),
+          );
+          expect(result, equals(ExitCode.success.code));
+        });
+      });
+
+      group('when no local engine args are provided', () {
+        test('uses empty engine config', () async {
+          final result = await runWithOverrides(
+            () => commandRunner.run([]),
+          );
+          expect(result, equals(ExitCode.success.code));
+        });
+      });
+
+      group('when some local engine args are provided', () {
+        test('throws ArgumentException', () async {
+          await expectLater(
+            () async => runWithOverrides(
+              () => commandRunner.run(['--local-engine', 'foo']),
+            ),
+            throwsArgumentError,
+          );
+        });
       });
     });
 

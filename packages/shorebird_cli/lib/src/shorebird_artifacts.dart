@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:scoped/scoped.dart';
 import 'package:shorebird_cli/src/cache.dart';
-import 'package:shorebird_cli/src/process.dart';
+import 'package:shorebird_cli/src/engine_config.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 
 /// All Shorebird artifacts used explicitly by Shorebird.
@@ -13,7 +13,7 @@ enum ShorebirdArtifact {
   /// The analyze_snapshot executable.
   analyzeSnapshot,
 
-  /// The aot_tools executable.
+  /// The aot_tools executable or kernel file.
   aotTools,
 
   /// The gen_snapshot executable.
@@ -73,6 +73,19 @@ class ShorebirdCachedArtifacts implements ShorebirdArtifacts {
 
   File get _aotToolsFile {
     const executableName = 'aot-tools';
+    final kernelFile = File(
+      p.join(
+        cache.getArtifactDirectory(executableName).path,
+        shorebirdEnv.shorebirdEngineRevision,
+        '$executableName.dill',
+      ),
+    );
+    if (kernelFile.existsSync()) {
+      return kernelFile;
+    }
+
+    // We shipped aot-tools as an executable in the past, so we return that if
+    // no kernel file is found.
     return File(
       p.join(
         cache.getArtifactDirectory(executableName).path,
