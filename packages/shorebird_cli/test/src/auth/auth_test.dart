@@ -2,8 +2,9 @@ import 'dart:convert';
 import 'dart:io' hide Platform;
 
 import 'package:cli_util/cli_util.dart';
-import 'package:googleapis_auth/googleapis_auth.dart';
+import 'package:googleapis_auth/googleapis_auth.dart' as oauth2;
 import 'package:http/http.dart' as http;
+import 'package:jwt/jwt.dart' show Jwt, JwtPayload;
 import 'package:mason_logger/mason_logger.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:path/path.dart' as p;
@@ -19,6 +20,10 @@ import 'package:test/test.dart';
 
 import '../fakes.dart';
 import '../mocks.dart';
+
+const googleJwtIssuer = 'https://accounts.google.com';
+const microsoftJwtIssuer =
+    'https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0';
 
 void main() {
   group('scoped', () {
@@ -37,26 +42,102 @@ void main() {
     });
   });
 
-  group('Auth', () {
+  group('JwtClaims', () {
+    group('email', () {
+      test('returns null when idToken is not a valid jwt', () {
+        final credentials = oauth2.AccessCredentials(
+          oauth2.AccessToken(
+            'Bearer',
+            'accessToken',
+            DateTime.now().add(const Duration(minutes: 10)).toUtc(),
+          ),
+          '',
+          [],
+          idToken: 'not a valid jwt',
+        );
+
+        expect(credentials.email, isNull);
+      });
+    });
+  });
+
+  group('OauthAuthProvider', () {
+    late Jwt jwt;
+    late JwtPayload payload;
+
+    setUp(() {
+      payload = MockJwtPayload();
+      jwt = Jwt(
+        header: MockJwtHeader(),
+        payload: payload,
+        signature: 'signature',
+      );
+    });
+
+    group('authProvider', () {
+      group('when issuer is login.microsoft.online', () {
+        setUp(() {
+          when(() => payload.iss).thenReturn(microsoftJwtIssuer);
+        });
+
+        test('returns AuthProvider.microsoft', () {
+          expect(jwt.authProvider, equals(AuthProvider.microsoft));
+        });
+      });
+
+      group('when issuer is accounts.google.com', () {
+        setUp(() {
+          when(() => payload.iss).thenReturn(googleJwtIssuer);
+        });
+
+        test('returns AuthProvider.google', () {
+          expect(jwt.authProvider, equals(AuthProvider.google));
+        });
+      });
+
+      group('when issuer is unknown', () {
+        setUp(() {
+          when(() => payload.iss).thenReturn('https://example.com');
+        });
+
+        test('throws exception', () {
+          expect(
+            () => jwt.authProvider,
+            throwsA(
+              isA<Exception>().having(
+                (e) => e.toString(),
+                'message',
+                'Exception: Unknown jwt issuer: https://example.com',
+              ),
+            ),
+          );
+        });
+      });
+    });
+  });
+
+  group(Auth, () {
     const idToken =
-        '''eyJhbGciOiJSUzI1NiIsImN0eSI6IkpXVCJ9.eyJlbWFpbCI6InRlc3RAZW1haWwuY29tIn0.pD47BhF3MBLyIpfsgWCzP9twzC1HJxGukpcR36DqT6yfiOMHTLcjDbCjRLAnklWEHiT0BQTKTfhs8IousU90Fm5bVKObudfKu8pP5iZZ6Ls4ohDjTrXky9j3eZpZjwv8CnttBVgRfMJG-7YASTFRYFcOLUpnb4Zm5R6QdoCDUYg''';
+        '''eyJhbGciOiJIUzI1NiIsImtpZCI6IjEyMzQiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJhenAiOiI1MjMzMDIyMzMyOTMtZWlhNWFudG0wdGd2ZWsyNDB0NDZvcmN0a3RpYWJyZWsuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJhdWQiOiI1MjMzMDIyMzMyOTMtZWlhNWFudG0wdGd2ZWsyNDB0NDZvcmN0a3RpYWJyZWsuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJzdWIiOiIxMjM0NSIsImhkIjoic2hvcmViaXJkLmRldiIsImVtYWlsIjoidGVzdEBlbWFpbC5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaWF0IjoxMjM0LCJleHAiOjY3ODl9.MYbITALvKsGYTYjw1o7AQ0ObkqRWVBSr9cFYJrvA46g''';
+    const refreshToken = 'shorebird-token';
+    const ciToken = CiToken(
+      refreshToken: refreshToken,
+      authProvider: AuthProvider.google,
+    );
     const email = 'test@email.com';
-    const user = User(id: 42, email: email);
-    const refreshToken = '';
+    const user = User(
+      id: 42,
+      email: email,
+      jwtIssuer: googleJwtIssuer,
+    );
     const scopes = <String>[];
-    final accessToken = AccessToken(
+    final accessToken = oauth2.AccessToken(
       'Bearer',
       'accessToken',
       DateTime.now().add(const Duration(minutes: 10)).toUtc(),
     );
 
-    final accessCredentials = AccessCredentials(
-      accessToken,
-      refreshToken,
-      scopes,
-      idToken: idToken,
-    );
-
+    late oauth2.AccessCredentials accessCredentials;
     late String credentialsDir;
     late http.Client httpClient;
     late CodePushClient codePushClient;
@@ -88,7 +169,7 @@ void main() {
             return codePushClient;
           },
           obtainAccessCredentials:
-              (clientId, scopes, client, userPrompt) async {
+              (authEndpoints, clientId, scopes, client, userPrompt) async {
             return accessCredentials;
           },
         ),
@@ -102,6 +183,12 @@ void main() {
     }
 
     setUp(() {
+      accessCredentials = oauth2.AccessCredentials(
+        accessToken,
+        refreshToken,
+        scopes,
+        idToken: idToken,
+      );
       credentialsDir = Directory.systemTemp.createTempSync().path;
       httpClient = MockHttpClient();
       codePushClient = MockCodePushClient();
@@ -116,15 +203,14 @@ void main() {
 
     group('AuthenticatedClient', () {
       group('token', () {
-        const token = 'shorebird-token';
-
         test('does not require an onRefreshCredentials callback', () {
           expect(
             () => AuthenticatedClient.token(
-              token: token,
+              token: ciToken,
               httpClient: httpClient,
-              refreshCredentials: (clientId, credentials, client) async =>
-                  accessCredentials,
+              refreshCredentials:
+                  (authEndpoints, clientId, credentials, client) async =>
+                      accessCredentials,
             ),
             returnsNormally,
           );
@@ -139,14 +225,15 @@ void main() {
             ),
           );
 
-          final onRefreshCredentialsCalls = <AccessCredentials>[];
+          final onRefreshCredentialsCalls = <oauth2.AccessCredentials>[];
 
           final client = AuthenticatedClient.token(
-            token: token,
+            token: ciToken,
             httpClient: httpClient,
             onRefreshCredentials: onRefreshCredentialsCalls.add,
-            refreshCredentials: (clientId, credentials, client) async =>
-                accessCredentials,
+            refreshCredentials:
+                (authEndpoints, clientId, credentials, client) async =>
+                    accessCredentials,
           );
 
           await runWithOverrides(
@@ -156,7 +243,7 @@ void main() {
           expect(
             onRefreshCredentialsCalls,
             equals([
-              isA<AccessCredentials>()
+              isA<oauth2.AccessCredentials>()
                   .having((c) => c.idToken, 'token', idToken),
             ]),
           );
@@ -173,13 +260,14 @@ void main() {
               HttpStatus.ok,
             ),
           );
-          final onRefreshCredentialsCalls = <AccessCredentials>[];
+          final onRefreshCredentialsCalls = <oauth2.AccessCredentials>[];
           final client = AuthenticatedClient.token(
-            token: token,
+            token: ciToken,
             httpClient: httpClient,
             onRefreshCredentials: onRefreshCredentialsCalls.add,
-            refreshCredentials: (clientId, credentials, client) async =>
-                accessCredentials,
+            refreshCredentials:
+                (authEndpoints, clientId, credentials, client) async =>
+                    accessCredentials,
           );
 
           await runWithOverrides(
@@ -209,24 +297,27 @@ void main() {
             ),
           );
 
-          final onRefreshCredentialsCalls = <AccessCredentials>[];
-          final expiredCredentials = AccessCredentials(
-            AccessToken(
+          const expiredIdToken =
+              '''eyJhbGciOiJIUzI1NiIsImtpZCI6IjEyMzQiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJhenAiOiI1MjMzMDIyMzMyOTMtZWlhNWFudG0wdGd2ZWsyNDB0NDZvcmN0a3RpYWJyZWsuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJhdWQiOiI1MjMzMDIyMzMyOTMtZWlhNWFudG0wdGd2ZWsyNDB0NDZvcmN0a3RpYWJyZWsuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJzdWIiOiIxMjM0NSIsImhkIjoic2hvcmViaXJkLmRldiIsImVtYWlsIjoidGVzdEBlbWFpbC5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaWF0IjoxMjM0LCJleHAiOjY3ODl9.MYbITALvKsGYTYjw1o7AQ0ObkqRWVBSr9cFYJrvA46g''';
+          final onRefreshCredentialsCalls = <oauth2.AccessCredentials>[];
+          final expiredCredentials = oauth2.AccessCredentials(
+            oauth2.AccessToken(
               'Bearer',
               'accessToken',
               DateTime.now().subtract(const Duration(minutes: 1)).toUtc(),
             ),
             '',
             [],
-            idToken: 'expiredIdToken',
+            idToken: expiredIdToken,
           );
 
           final client = AuthenticatedClient.credentials(
             credentials: expiredCredentials,
             httpClient: httpClient,
             onRefreshCredentials: onRefreshCredentialsCalls.add,
-            refreshCredentials: (clientId, credentials, client) async =>
-                accessCredentials,
+            refreshCredentials:
+                (authEndpoints, clientId, credentials, client) async =>
+                    accessCredentials,
           );
 
           await runWithOverrides(
@@ -236,7 +327,7 @@ void main() {
           expect(
             onRefreshCredentialsCalls,
             equals([
-              isA<AccessCredentials>()
+              isA<oauth2.AccessCredentials>()
                   .having((c) => c.idToken, 'token', idToken),
             ]),
           );
@@ -253,7 +344,7 @@ void main() {
               HttpStatus.ok,
             ),
           );
-          final onRefreshCredentialsCalls = <AccessCredentials>[];
+          final onRefreshCredentialsCalls = <oauth2.AccessCredentials>[];
           final client = AuthenticatedClient.credentials(
             credentials: accessCredentials,
             httpClient: httpClient,
@@ -283,7 +374,7 @@ void main() {
             HttpStatus.ok,
           ),
         );
-        await auth.login((_) {});
+        await auth.login(AuthProvider.google, prompt: (_) {});
         final client = auth.client;
         expect(client, isA<http.Client>());
         expect(client, isA<AuthenticatedClient>());
@@ -298,10 +389,28 @@ void main() {
         expect(request.headers['Authorization'], equals('Bearer $idToken'));
       });
 
+      group('when token is invalid', () {
+        setUp(() {
+          when(() => platform.environment).thenReturn(
+            <String, String>{shorebirdTokenEnvVar: 'not a base64 string'},
+          );
+        });
+
+        test('prints warning message when token string is not valid base64',
+            () async {
+          auth = buildAuth();
+          verify(
+            () => logger.warn('''
+The value of $shorebirdTokenEnvVar is not a valid base64-encoded token. This
+will become an error in the next major release. Run `shorebird login:ci` before
+then to obtain a new token.'''),
+          ).called(1);
+        });
+      });
+
       test(
           'returns an authenticated client '
-          'when a token is present.', () async {
-        const token = 'shorebird-token';
+          'when a token and token provider is present.', () async {
         when(() => httpClient.send(any())).thenAnswer(
           (_) async => http.StreamedResponse(
             const Stream.empty(),
@@ -309,7 +418,7 @@ void main() {
           ),
         );
         when(() => platform.environment).thenReturn(
-          <String, String>{'SHOREBIRD_TOKEN': token},
+          <String, String>{shorebirdTokenEnvVar: ciToken.toBase64()},
         );
         auth = buildAuth();
         final client = auth.client;
@@ -317,24 +426,34 @@ void main() {
         expect(client, isA<AuthenticatedClient>());
       });
 
-      test(
-          'returns a plain http client '
-          'when credentials are not present.', () async {
+      test('returns a plain http client when credentials are not present.',
+          () async {
         final client = auth.client;
         expect(client, isA<http.Client>());
-        expect(client, isNot(isA<AutoRefreshingAuthClient>()));
+        expect(client, isNot(isA<oauth2.AutoRefreshingAuthClient>()));
       });
     });
 
     group('login', () {
-      test(
-          'should set the email when claims are valid '
-          'and current user exists', () async {
-        await auth.login((_) {});
+      test('should set the email when claims are valid and current user exists',
+          () async {
+        await auth.login(AuthProvider.google, prompt: (_) {});
         expect(auth.email, email);
         expect(auth.isAuthenticated, isTrue);
         expect(buildAuth().email, email);
         expect(buildAuth().isAuthenticated, isTrue);
+      });
+
+      group('with custom auth provider', () {
+        test(
+            '''should set the email when claims are valid and current user exists''',
+            () async {
+          await auth.login(AuthProvider.microsoft, prompt: (_) {});
+          expect(auth.email, email);
+          expect(auth.isAuthenticated, isTrue);
+          expect(buildAuth().email, email);
+          expect(buildAuth().isAuthenticated, isTrue);
+        });
       });
 
       test('throws UserAlreadyLoggedInException if user is authenticated',
@@ -343,7 +462,7 @@ void main() {
         auth = buildAuth();
 
         await expectLater(
-          auth.login((_) {}),
+          auth.login(AuthProvider.google, prompt: (_) {}),
           throwsA(isA<UserAlreadyLoggedInException>()),
         );
 
@@ -356,7 +475,7 @@ void main() {
             .thenAnswer((_) async => null);
 
         await expectLater(
-          auth.login((_) {}),
+          auth.login(AuthProvider.google, prompt: (_) {}),
           throwsA(isA<UserNotFoundException>()),
         );
 
@@ -366,21 +485,18 @@ void main() {
     });
 
     group('loginCI', () {
-      const token = 'shorebird-token';
       setUp(() {
         when(() => platform.environment).thenReturn(
-          <String, String>{'SHOREBIRD_TOKEN': token},
+          <String, String>{shorebirdTokenEnvVar: ciToken.toBase64()},
         );
         auth = buildAuth();
       });
 
-      test(
-          'returns credentials and does not set the email or cache credentials',
+      test('returns a CI token and does not set the email or cache credentials',
           () async {
-        await expectLater(
-          auth.loginCI((_) {}),
-          completion(equals(accessCredentials)),
-        );
+        final token = await auth.loginCI(AuthProvider.google, prompt: (_) {});
+        expect(token.authProvider, ciToken.authProvider);
+        expect(token.refreshToken, ciToken.refreshToken);
         expect(auth.email, isNull);
         expect(auth.isAuthenticated, isTrue);
         expect(buildAuth().email, isNull);
@@ -395,17 +511,41 @@ void main() {
         ).thenAnswer((_) async => null);
 
         await expectLater(
-          auth.loginCI((_) {}),
+          auth.loginCI(AuthProvider.google, prompt: (_) {}),
           throwsA(isA<UserNotFoundException>()),
         );
 
         expect(auth.email, isNull);
       });
+
+      group('when credentials are missing a refresh token', () {
+        setUp(() {
+          accessCredentials = oauth2.AccessCredentials(
+            accessToken,
+            null,
+            scopes,
+            idToken: idToken,
+          );
+        });
+
+        test('throws if credentials are missing a refresh token', () async {
+          await expectLater(
+            auth.loginCI(AuthProvider.google, prompt: (_) {}),
+            throwsA(
+              isA<Exception>().having(
+                (e) => e.toString(),
+                'toString',
+                'Exception: No refresh token found.',
+              ),
+            ),
+          );
+        });
+      });
     });
 
     group('logout', () {
       test('clears session and wipes state', () async {
-        await auth.login((_) {});
+        await auth.login(AuthProvider.google, prompt: (_) {});
         expect(auth.email, email);
         expect(auth.isAuthenticated, isTrue);
 

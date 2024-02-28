@@ -23,6 +23,7 @@ import 'package:shorebird_cli/src/os/operating_system_interface.dart';
 import 'package:shorebird_cli/src/patch_diff_checker.dart';
 import 'package:shorebird_cli/src/platform.dart';
 import 'package:shorebird_cli/src/shorebird_artifacts.dart';
+import 'package:shorebird_cli/src/shorebird_build_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 import 'package:shorebird_cli/src/shorebird_flutter.dart';
 import 'package:shorebird_cli/src/shorebird_process.dart';
@@ -138,8 +139,8 @@ flutter:
   );
 
   group(PatchIosCommand, () {
-    late ArgResults argResults;
     late AotTools aotTools;
+    late ArgResults argResults;
     late ArtifactManager artifactManager;
     late Auth auth;
     late CodePushClientWrapper codePushClientWrapper;
@@ -324,14 +325,24 @@ flutter:
       when(() => argResults['codesign']).thenReturn(true);
       when(() => argResults['staging']).thenReturn(false);
       when(() => argResults.rest).thenReturn([]);
+      when(() => argResults.wasParsed(any())).thenReturn(true);
       when(
         () => aotTools.link(
           base: any(named: 'base'),
           patch: any(named: 'patch'),
           analyzeSnapshot: any(named: 'analyzeSnapshot'),
           workingDirectory: any(named: 'workingDirectory'),
+          outputPath: any(named: 'outputPath'),
         ),
       ).thenAnswer((_) async {});
+      when(() => aotTools.isGeneratePatchDiffBaseSupported())
+          .thenAnswer((_) async => false);
+      when(
+        () => aotTools.generatePatchDiffBase(
+          releaseSnapshot: any(named: 'releaseSnapshot'),
+          analyzeSnapshotPath: any(named: 'analyzeSnapshotPath'),
+        ),
+      ).thenAnswer((_) async => File(''));
       when(() => artifactManager.downloadFile(any()))
           .thenAnswer((_) async => releaseArtifactFile);
       when(
@@ -339,7 +350,27 @@ flutter:
           zipFile: any(named: 'zipFile'),
           outputDirectory: any(named: 'outputDirectory'),
         ),
-      ).thenAnswer((_) async {});
+      ).thenAnswer((invocation) async {
+        final outputDirectory =
+            invocation.namedArguments[#outputDirectory] as Directory;
+        File(
+          p.join(
+            outputDirectory.path,
+            'Products',
+            'Applications',
+            'App.app',
+            'Frameworks',
+            'App.framework',
+            'App',
+          ),
+        ).createSync(recursive: true);
+      });
+      when(
+        () => artifactManager.createDiff(
+          releaseArtifactPath: any(named: 'releaseArtifactPath'),
+          patchArtifactPath: any(named: 'patchArtifactPath'),
+        ),
+      ).thenAnswer((_) async => '');
       when(() => auth.isAuthenticated).thenReturn(true);
       when(() => auth.client).thenReturn(httpClient);
       when(
@@ -450,6 +481,10 @@ flutter:
       command = runWithOverrides(
         () => PatchIosCommand(archiveDiffer: archiveDiffer),
       )..testArgResults = argResults;
+    });
+
+    test('supports alpha alias', () {
+      expect(command.aliases, contains('ios-alpha'));
     });
 
     test('has a description', () {
@@ -890,6 +925,29 @@ Please re-run the release command for this version or create a new release.'''),
       ).called(1);
     });
 
+    group('when release artifact fails to extract', () {
+      setUp(() {
+        setUpProjectRoot();
+        setUpProjectRootArtifacts();
+
+        when(
+          () => artifactManager.extractZip(
+            zipFile: any(named: 'zipFile'),
+            outputDirectory: any(named: 'outputDirectory'),
+          ),
+        ).thenAnswer((invocation) async {});
+      });
+
+      test('prints error message and exits with code 70', () async {
+        final exitCode = await runWithOverrides(command.run);
+
+        expect(exitCode, equals(ExitCode.software.code));
+        verify(
+          () => logger.err('Unable to find release artifact .app directory'),
+        ).called(1);
+      });
+    });
+
     test(
         '''exits with code 70 if zipAndConfirmUnpatchableDiffsIfNecessary throws UnpatchableChangeException''',
         () async {
@@ -942,8 +1000,10 @@ Please re-run the release command for this version or create a new release.'''),
             patch: any(named: 'patch'),
             analyzeSnapshot: any(named: 'analyzeSnapshot'),
             workingDirectory: any(named: 'workingDirectory'),
+            outputPath: any(named: 'outputPath'),
           ),
         );
+        verifyNever(() => aotTools.isGeneratePatchDiffBaseSupported());
       });
     });
 
@@ -973,6 +1033,7 @@ Please re-run the release command for this version or create a new release.'''),
               patch: any(named: 'patch'),
               analyzeSnapshot: any(named: 'analyzeSnapshot'),
               workingDirectory: any(named: 'workingDirectory'),
+              outputPath: any(named: 'outputPath'),
             ),
           ).called(1);
         });
@@ -986,6 +1047,7 @@ Please re-run the release command for this version or create a new release.'''),
             patch: any(named: 'patch'),
             analyzeSnapshot: any(named: 'analyzeSnapshot'),
             workingDirectory: any(named: 'workingDirectory'),
+            outputPath: any(named: 'outputPath'),
           ),
         ).called(1);
       });
@@ -1031,6 +1093,7 @@ Please re-run the release command for this version or create a new release.'''),
               patch: any(named: 'patch'),
               analyzeSnapshot: any(named: 'analyzeSnapshot'),
               workingDirectory: any(named: 'workingDirectory'),
+              outputPath: any(named: 'outputPath'),
             ),
           ).thenThrow(exception);
         });
@@ -1043,6 +1106,65 @@ Please re-run the release command for this version or create a new release.'''),
             () => progress.fail('Failed to link AOT files: $exception'),
           ).called(1);
         });
+      });
+    });
+
+    group('when aot-tools supports generating patch diff base', () {
+      const diffPath = 'path/to/diff';
+      setUp(() {
+        setUpProjectRoot();
+        setUpProjectRootArtifacts();
+
+        when(
+          () => codePushClientWrapper.getRelease(
+            appId: any(named: 'appId'),
+            releaseVersion: any(named: 'releaseVersion'),
+          ),
+        ).thenAnswer((_) async => postLinkerRelease);
+        when(() => aotTools.isGeneratePatchDiffBaseSupported())
+            .thenAnswer((_) async => true);
+        when(
+          () => artifactManager.createDiff(
+            releaseArtifactPath: any(named: 'releaseArtifactPath'),
+            patchArtifactPath: any(named: 'patchArtifactPath'),
+          ),
+        ).thenAnswer((_) async => diffPath);
+      });
+
+      group('when generatePatchDiffBase fails', () {
+        const errorMessage = 'oops something went wrong';
+        setUp(() {
+          when(
+            () => aotTools.generatePatchDiffBase(
+              analyzeSnapshotPath: any(named: 'analyzeSnapshotPath'),
+              releaseSnapshot: any(named: 'releaseSnapshot'),
+            ),
+          ).thenThrow(Exception(errorMessage));
+        });
+
+        test('prints error and exits with code 70', () async {
+          final result = await runWithOverrides(command.run);
+
+          expect(result, equals(ExitCode.software.code));
+          verify(() => progress.fail('Exception: $errorMessage')).called(1);
+        });
+      });
+
+      test('generates diff base and publishes the appropriate patch', () async {
+        await runWithOverrides(command.run);
+        verify(
+          () => codePushClientWrapper.publishPatch(
+            appId: appId,
+            releaseId: postLinkerRelease.id,
+            platform: releasePlatform,
+            track: track,
+            patchArtifactBundles: any(
+              named: 'patchArtifactBundles',
+              that: isA<Map<Arch, PatchArtifactBundle>>()
+                  .having((e) => e[Arch.arm64]!.path, 'patch path', diffPath),
+            ),
+          ),
+        ).called(1);
       });
     });
 
@@ -1103,6 +1225,22 @@ Please re-run the release command for this version or create a new release.'''),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
         ),
       ).called(1);
+
+      // Verify that an export options plist was provided to the build ipa
+      // command.
+      const exportOptionsPlistArgName = 'export-options-plist';
+      final capturedArgs = verify(
+        () => shorebirdProcess.run(
+          'flutter',
+          captureAny(),
+          runInShell: any(named: 'runInShell'),
+        ),
+      ).captured.first as List<String>;
+      final exportOptionsPlistArg = capturedArgs
+          .whereType<String>()
+          .firstWhereOrNull((arg) => arg.contains(exportOptionsPlistArgName));
+      expect(exportOptionsPlistArg, isNotNull);
+
       expect(exitCode, ExitCode.success.code);
     });
 

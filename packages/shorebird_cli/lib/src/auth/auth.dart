@@ -5,14 +5,19 @@ import 'package:cli_util/cli_util.dart';
 import 'package:googleapis_auth/auth_io.dart' as oauth2;
 import 'package:googleapis_auth/googleapis_auth.dart';
 import 'package:http/http.dart' as http;
+import 'package:jwt/jwt.dart';
 import 'package:path/path.dart' as p;
 import 'package:scoped/scoped.dart';
-import 'package:shorebird_cli/src/auth/jwt.dart';
+import 'package:shorebird_cli/src/auth/ci_token.dart';
+import 'package:shorebird_cli/src/auth/endpoints/endpoints.dart';
 import 'package:shorebird_cli/src/command.dart';
 import 'package:shorebird_cli/src/command_runner.dart';
 import 'package:shorebird_cli/src/http_client/http_client.dart';
+import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/platform.dart';
 import 'package:shorebird_code_push_client/shorebird_code_push_client.dart';
+
+export 'ci_token.dart';
 
 // A reference to a [Auth] instance.
 final authRef = create(Auth.new);
@@ -20,25 +25,19 @@ final authRef = create(Auth.new);
 // The [Auth] instance available in the current zone.
 Auth get auth => read(authRef);
 
-final _clientId = oauth2.ClientId(
-  /// Shorebird CLI's OAuth 2.0 identifier.
-  '523302233293-eia5antm0tgvek240t46orctktiabrek.apps.googleusercontent.com',
+/// The JWT issuer field for Google-issued JWTs.
+const googleJwtIssuer = 'https://accounts.google.com';
 
-  /// Shorebird CLI's OAuth 2.0 secret.
-  ///
-  /// This isn't actually meant to be kept secret.
-  /// There is no way to properly secure a secret for installed/console applications.
-  /// Fortunately the OAuth2 flow used in this case assumes that the app cannot
-  /// keep secrets so this particular secret DOES NOT need to be kept secret.
-  /// You should however make sure not to re-use the same secret
-  /// anywhere secrecy is required.
-  ///
-  /// For more info see: https://developers.google.com/identity/protocols/oauth2/native-app
-  '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',
-);
-final _scopes = ['openid', 'https://www.googleapis.com/auth/userinfo.email'];
+/// Microsoft-issued JWTs are of the form
+/// https://login.microsoftonline.com/{tenant-id}/v2.0. We don't care about the
+/// tenant ID, so we just match the prefix.
+const microsoftJwtIssuerPrefix = 'https://login.microsoftonline.com/';
+
+/// The environment variable that holds the Shorebird CI token.
+const shorebirdTokenEnvVar = 'SHOREBIRD_TOKEN';
 
 typedef ObtainAccessCredentials = Future<oauth2.AccessCredentials> Function(
+  oauth2.AuthEndpoints authEndpoints,
   oauth2.ClientId clientId,
   List<String> scopes,
   http.Client client,
@@ -46,6 +45,7 @@ typedef ObtainAccessCredentials = Future<oauth2.AccessCredentials> Function(
 );
 
 typedef RefreshCredentials = Future<oauth2.AccessCredentials> Function(
+  oauth2.AuthEndpoints authEndpoints,
   oauth2.ClientId clientId,
   oauth2.AccessCredentials credentials,
   http.Client client,
@@ -70,7 +70,7 @@ class AuthenticatedClient extends http.BaseClient {
 
   AuthenticatedClient.token({
     required http.Client httpClient,
-    required String token,
+    required CiToken token,
     OnRefreshCredentials? onRefreshCredentials,
     RefreshCredentials refreshCredentials = oauth2.refreshCredentials,
   }) : this._(
@@ -84,7 +84,7 @@ class AuthenticatedClient extends http.BaseClient {
     required http.Client httpClient,
     OnRefreshCredentials? onRefreshCredentials,
     oauth2.AccessCredentials? credentials,
-    String? token,
+    CiToken? token,
     RefreshCredentials refreshCredentials = oauth2.refreshCredentials,
   })  : _baseClient = httpClient,
         _credentials = credentials,
@@ -96,7 +96,7 @@ class AuthenticatedClient extends http.BaseClient {
   final OnRefreshCredentials? _onRefreshCredentials;
   final RefreshCredentials _refreshCredentials;
   oauth2.AccessCredentials? _credentials;
-  final String? _token;
+  final CiToken? _token;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
@@ -105,21 +105,26 @@ class AuthenticatedClient extends http.BaseClient {
     if (credentials == null) {
       final token = _token!;
       credentials = _credentials = await _refreshCredentials(
-        _clientId,
+        token.authProvider.authEndpoints,
+        token.authProvider.clientId,
         oauth2.AccessCredentials(
           // This isn't relevant for a refresh operation.
           AccessToken('Bearer', '', DateTime.timestamp()),
-          token,
-          _scopes,
+          token.refreshToken,
+          token.authProvider.scopes,
         ),
         _baseClient,
       );
       _onRefreshCredentials?.call(credentials);
     }
 
-    if (credentials.accessToken.hasExpired) {
+    if (credentials.accessToken.hasExpired && credentials.idToken != null) {
+      final jwt = Jwt.parse(credentials.idToken!);
+      final authProvider = jwt.authProvider;
+
       credentials = _credentials = await _refreshCredentials(
-        _clientId,
+        authProvider.authEndpoints,
+        authProvider.clientId,
         credentials,
         _baseClient,
       );
@@ -153,7 +158,7 @@ class Auth {
   final String _credentialsDir;
   final ObtainAccessCredentials _obtainAccessCredentials;
   final CodePushClientBuilder _buildCodePushClient;
-  String? _token;
+  CiToken? _token;
 
   String get credentialsFilePath {
     return p.join(_credentialsDir, 'credentials.json');
@@ -165,7 +170,10 @@ class Auth {
     }
 
     if (_token != null) {
-      return AuthenticatedClient.token(token: _token!, httpClient: _httpClient);
+      return AuthenticatedClient.token(
+        token: _token!,
+        httpClient: _httpClient,
+      );
     }
 
     return AuthenticatedClient.credentials(
@@ -175,12 +183,16 @@ class Auth {
     );
   }
 
-  Future<AccessCredentials> loginCI(void Function(String) prompt) async {
+  Future<CiToken> loginCI(
+    AuthProvider authProvider, {
+    required void Function(String) prompt,
+  }) async {
     final client = http.Client();
     try {
       final credentials = await _obtainAccessCredentials(
-        _clientId,
-        _scopes,
+        authProvider.authEndpoints,
+        authProvider.clientId,
+        authProvider.scopes,
         client,
         prompt,
       );
@@ -195,13 +207,23 @@ class Auth {
       if (user == null) {
         throw UserNotFoundException(email: credentials.email!);
       }
-      return credentials;
+      if (credentials.refreshToken == null) {
+        throw Exception('No refresh token found.');
+      }
+
+      return CiToken(
+        refreshToken: credentials.refreshToken!,
+        authProvider: authProvider,
+      );
     } finally {
       client.close();
     }
   }
 
-  Future<void> login(void Function(String) prompt) async {
+  Future<void> login(
+    AuthProvider authProvider, {
+    required void Function(String) prompt,
+  }) async {
     if (_credentials != null) {
       throw UserAlreadyLoggedInException(email: _credentials!.email!);
     }
@@ -209,8 +231,9 @@ class Auth {
     final client = http.Client();
     try {
       _credentials = await _obtainAccessCredentials(
-        _clientId,
-        _scopes,
+        authProvider.authEndpoints,
+        authProvider.clientId,
+        authProvider.scopes,
         client,
         prompt,
       );
@@ -240,9 +263,22 @@ class Auth {
   bool get isAuthenticated => _email != null || _token != null;
 
   void _loadCredentials() {
-    final token = platform.environment['SHOREBIRD_TOKEN'];
-    if (token != null) {
-      _token = token;
+    final envToken = platform.environment[shorebirdTokenEnvVar];
+    if (envToken != null) {
+      try {
+        _token = CiToken.fromBase64(envToken);
+      } catch (_) {
+        // TODO(bryanoltman): Remove this legacy behavior after July 2024 or
+        // next major release.
+        logger.warn('''
+The value of $shorebirdTokenEnvVar is not a valid base64-encoded token. This
+will become an error in the next major release. Run `shorebird login:ci` before
+then to obtain a new token.''');
+        _token = CiToken(
+          refreshToken: envToken,
+          authProvider: AuthProvider.google,
+        );
+      }
       return;
     }
 
@@ -279,17 +315,20 @@ class Auth {
   }
 }
 
-extension on oauth2.AccessCredentials {
+extension JwtClaims on oauth2.AccessCredentials {
   String? get email {
     final token = idToken;
 
     if (token == null) return null;
 
-    final claims = Jwt.decodeClaims(token);
+    final Jwt jwt;
+    try {
+      jwt = Jwt.parse(token);
+    } catch (_) {
+      return null;
+    }
 
-    if (claims == null) return null;
-
-    return claims['email'] as String?;
+    return jwt.claims['email'] as String?;
   }
 }
 
@@ -313,4 +352,63 @@ class UserNotFoundException implements Exception {
   /// The email used to locate the user, as derived from the stored auth
   /// credentials.
   final String email;
+}
+
+extension OauthAuthProvider on Jwt {
+  AuthProvider get authProvider {
+    if (payload.iss == googleJwtIssuer) {
+      return AuthProvider.google;
+    } else if (payload.iss.startsWith(microsoftJwtIssuerPrefix)) {
+      return AuthProvider.microsoft;
+    }
+
+    throw Exception('Unknown jwt issuer: ${payload.iss}');
+  }
+}
+
+extension OauthValues on AuthProvider {
+  oauth2.AuthEndpoints get authEndpoints => switch (this) {
+        (AuthProvider.google) => oauth2.GoogleAuthEndpoints(),
+        (AuthProvider.microsoft) => MicrosoftAuthEndpoints(),
+      };
+
+  oauth2.ClientId get clientId {
+    switch (this) {
+      case AuthProvider.google:
+        return oauth2.ClientId(
+          /// Shorebird CLI's OAuth 2.0 identifier for GCP,
+          '''523302233293-eia5antm0tgvek240t46orctktiabrek.apps.googleusercontent.com''',
+
+          /// Shorebird CLI's OAuth 2.0 secret for GCP.
+          ///
+          /// This isn't actually meant to be kept secret.
+          /// There is no way to properly secure a secret for installed/console applications.
+          /// Fortunately the OAuth2 flow used in this case assumes that the app
+          /// cannot keep secrets so this particular secret DOES NOT need to be
+          /// kept secret. You should however make sure not to re-use the same
+          /// secret anywhere secrecy is required.
+          ///
+          /// For more info see: https://developers.google.com/identity/protocols/oauth2/native-app
+          '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',
+        );
+      case AuthProvider.microsoft:
+        return oauth2.ClientId(
+          /// Shorebird CLI's OAuth 2.0 identifier for Azure/Entra.
+          '0ff83897-ec85-4642-a250-48d5f595137c',
+        );
+    }
+  }
+
+  List<String> get scopes => switch (this) {
+        (AuthProvider.google) => [
+            'openid',
+            'https://www.googleapis.com/auth/userinfo.email',
+          ],
+        (AuthProvider.microsoft) => [
+            'openid',
+            'email',
+            // Required to get refresh tokens.
+            'offline_access',
+          ],
+      };
 }

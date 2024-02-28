@@ -8,50 +8,21 @@ import 'package:shorebird_cli/src/code_push_client_wrapper.dart';
 import 'package:shorebird_cli/src/command.dart';
 import 'package:shorebird_cli/src/config/config.dart';
 import 'package:shorebird_cli/src/doctor.dart';
-import 'package:shorebird_cli/src/ios.dart';
+import 'package:shorebird_cli/src/extensions/arg_results.dart';
 import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/shorebird_artifact_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_build_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 import 'package:shorebird_cli/src/shorebird_flutter.dart';
 import 'package:shorebird_cli/src/shorebird_validator.dart';
+import 'package:shorebird_cli/src/validators/validators.dart';
 import 'package:shorebird_code_push_client/shorebird_code_push_client.dart';
 
 const exportMethodArgName = 'export-method';
 const exportOptionsPlistArgName = 'export-options-plist';
 
-/// {@template export_method}
-/// The method used to export the IPA.
-/// {@endtemplate}
-enum ExportMethod {
-  appStore('app-store', 'Upload to the App Store'),
-  adHoc(
-    'ad-hoc',
-    '''
-Test on designated devices that do not need to be registered with the Apple developer account.
-    Requires a distribution certificate.''',
-  ),
-  development(
-    'development',
-    '''Test only on development devices registered with the Apple developer account.''',
-  ),
-  enterprise(
-    'enterprise',
-    'Distribute an app registered with the Apple Developer Enterprise Program.',
-  );
-
-  /// {@macro export_method}
-  const ExportMethod(this.argName, this.description);
-
-  /// The command-line argument name for this export method.
-  final String argName;
-
-  /// A description of this method and how/when it should be used.
-  final String description;
-}
-
 /// {@template release_ios_command}
-/// `shorebird release ios-alpha`
+/// `shorebird release ios`
 /// Create new app releases for iOS.
 /// {@endtemplate}
 class ReleaseIosCommand extends ShorebirdCommand
@@ -68,11 +39,6 @@ class ReleaseIosCommand extends ShorebirdCommand
         'flavor',
         help: 'The product flavor to use when building the app.',
       )
-      ..addFlag(
-        'codesign',
-        help: 'Codesign the application bundle.',
-        defaultsTo: true,
-      )
       ..addOption(
         exportMethodArgName,
         defaultsTo: ExportMethod.appStore.argName,
@@ -88,6 +54,15 @@ class ReleaseIosCommand extends ShorebirdCommand
         help:
             '''Export an IPA with these options. See "xcodebuild -h" for available exportOptionsPlist keys.''',
       )
+      ..addOption(
+        'flutter-version',
+        help: 'The Flutter version to use when building the app (e.g: 3.16.3).',
+      )
+      ..addFlag(
+        'codesign',
+        help: 'Codesign the application bundle.',
+        defaultsTo: true,
+      )
       ..addFlag(
         'force',
         abbr: 'f',
@@ -97,6 +72,12 @@ class ReleaseIosCommand extends ShorebirdCommand
   }
 
   @override
+  String get name => 'ios';
+
+  @override
+  List<String> get aliases => ['ios-alpha'];
+
+  @override
   String get description => '''
 Builds and submits your iOS app to Shorebird.
 Shorebird saves the compiled Dart code from your application in order to
@@ -104,22 +85,31 @@ make smaller updates to your app.
 ''';
 
   @override
-  String get name => 'ios-alpha';
-
-  @override
   Future<int> run() async {
     try {
       await shorebirdValidator.validatePreconditions(
         checkUserIsAuthenticated: true,
         checkShorebirdInitialized: true,
-        validators: doctor.iosCommandValidators,
+        validators: [
+          ...doctor.iosCommandValidators,
+          ShorebirdFlutterVersionSupportsIOSValidator(),
+        ],
         supportedOperatingSystems: {Platform.macOS},
       );
     } on PreconditionFailedException catch (e) {
       return e.exitCode.code;
     }
 
-    showiOSStatusWarning();
+    if (results.rest.contains('--obfuscate')) {
+      // Obfuscated releases break patching, so we don't support them.
+      // See https://github.com/shorebirdtech/shorebird/issues/1619
+      logger
+        ..err('Shorebird does not currently support obfuscation on iOS.')
+        ..info(
+          '''We hope to support obfuscation in the future. We are tracking this work at ${link(uri: Uri.parse('https://github.com/shorebirdtech/shorebird/issues/1619'))}.''',
+        );
+      return ExitCode.usage.code;
+    }
 
     final codesign = results['codesign'] == true;
     if (!codesign) {
@@ -139,26 +129,82 @@ make smaller updates to your app.
       );
       return ExitCode.usage.code;
     }
-    final exportOptionsPlist = exportPlistArg != null
-        ? File(exportPlistArg)
-        : _createExportOptionsPlist(
-            exportMethod: results[exportMethodArgName] as String,
-          );
-    try {
-      _validateExportOptionsPlist(exportOptionsPlist);
-    } catch (error) {
-      logger.err('$error');
-      return ExitCode.usage.code;
+
+    final File? exportOptionsPlist;
+    if (exportPlistArg != null) {
+      exportOptionsPlist = File(exportPlistArg);
+      try {
+        _validateExportOptionsPlist(exportOptionsPlist);
+      } catch (error) {
+        logger.err('$error');
+        return ExitCode.usage.code;
+      }
+    } else if (results.wasParsed(exportMethodArgName)) {
+      final exportMethod = ExportMethod.values.firstWhere(
+        (element) => element.argName == results[exportMethodArgName] as String,
+      );
+      exportOptionsPlist = createExportOptionsPlist(exportMethod: exportMethod);
+    } else {
+      exportOptionsPlist = null;
     }
 
     const releasePlatform = ReleasePlatform.ios;
-    final flavor = results['flavor'] as String?;
-    final target = results['target'] as String?;
+    final flavor = results.findOption('flavor', argParser: argParser);
+    final target = results.findOption('target', argParser: argParser);
+    final flutterVersion = results.findOption(
+      'flutter-version',
+      argParser: argParser,
+    );
     final shorebirdYaml = shorebirdEnv.getShorebirdYaml()!;
     final appId = shorebirdYaml.getAppId(flavor: flavor);
     final app = await codePushClientWrapper.getApp(appId: appId);
 
-    final buildProgress = logger.progress('Building release');
+    var flutterRevision = shorebirdEnv.flutterRevision;
+    if (flutterVersion != null) {
+      final String? revision;
+      try {
+        revision = await shorebirdFlutter.getRevisionForVersion(
+          flutterVersion,
+        );
+      } catch (error) {
+        logger.err(
+          '''
+Unable to determine revision for Flutter version: $flutterVersion.
+$error''',
+        );
+        return ExitCode.software.code;
+      }
+
+      if (revision == null) {
+        final openIssueLink = link(
+          uri: Uri.parse(
+            'https://github.com/shorebirdtech/shorebird/issues/new?assignees=&labels=feature&projects=&template=feature_request.md&title=feat%3A+',
+          ),
+          message: 'open an issue',
+        );
+        logger.err('''
+Version $flutterVersion not found. Please $openIssueLink to request a new version.
+Use `shorebird flutter versions list` to list available versions.
+''');
+        return ExitCode.software.code;
+      }
+
+      flutterRevision = revision;
+    }
+
+    final originalFlutterRevision = shorebirdEnv.flutterRevision;
+    final switchFlutterRevision = flutterRevision != originalFlutterRevision;
+
+    if (switchFlutterRevision) {
+      await shorebirdFlutter.useRevision(revision: flutterRevision);
+    }
+
+    final flutterVersionString = await shorebirdFlutter.getVersionAndRevision();
+
+    final buildProgress = logger.progress(
+      'Building release with Flutter $flutterVersionString',
+    );
+
     try {
       await buildIpa(
         codesign: codesign,
@@ -173,20 +219,27 @@ make smaller updates to your app.
       buildProgress.fail('Failed to build');
       logger.err(error.message);
       return ExitCode.software.code;
+    } finally {
+      if (switchFlutterRevision) {
+        await shorebirdFlutter.useRevision(revision: originalFlutterRevision);
+      }
     }
 
     buildProgress.complete();
 
-    final archivePath = getXcarchiveDirectory()?.path;
-    if (archivePath == null) {
+    final archiveDirectory = getXcarchiveDirectory();
+    if (archiveDirectory == null) {
       logger.err('Unable to find .xcarchive directory');
       return ExitCode.software.code;
     }
-    final runnerPath = getAppDirectory()?.path;
-    if (runnerPath == null) {
+    final archivePath = archiveDirectory.path;
+
+    final appDirectory = getAppDirectory(xcarchiveDirectory: archiveDirectory);
+    if (appDirectory == null) {
       logger.err('Unable to find .app directory');
       return ExitCode.software.code;
     }
+    final runnerPath = appDirectory.path;
 
     final plistFile = File(p.join(archivePath, 'Info.plist'));
     if (!plistFile.existsSync()) {
@@ -216,13 +269,12 @@ make smaller updates to your app.
       );
     }
 
-    final flutterVersion = await shorebirdFlutter.getVersionAndRevision();
     final summary = [
       '''📱 App: ${lightCyan.wrap(app.displayName)} ${lightCyan.wrap('($appId)')}''',
       if (flavor != null) '🍧 Flavor: ${lightCyan.wrap(flavor)}',
       '📦 Release Version: ${lightCyan.wrap(releaseVersion)}',
       '''🕹️  Platform: ${lightCyan.wrap(releasePlatform.name)}''',
-      '🐦 Flutter Version: ${lightCyan.wrap(flutterVersion)}',
+      '🐦 Flutter Version: ${lightCyan.wrap(flutterVersionString)}',
     ];
 
     logger.info('''
@@ -334,37 +386,5 @@ ${styleBold.wrap('Make sure to uncheck "Manage Version and Build Number", or els
         '''Export options plist ${exportOptionsPlistFile.path} does not set manageAppVersionAndBuildNumber to false. This is required for shorebird to work.''',
       );
     }
-  }
-
-  /// Creates an ExportOptions.plist file, which is used to tell xcodebuild to
-  /// not manage the app version and build number. If we don't do this, then
-  /// xcodebuild will increment the build number if it detects an App Store
-  /// Connect build with the same version and build number. This is a problem
-  /// for us when patching, as patches need to have the same version and build
-  /// number as the release they are patching.
-  /// See
-  /// https://developer.apple.com/forums/thread/690647?answerId=689925022#689925022
-  File _createExportOptionsPlist({required String exportMethod}) {
-    final plistContents = '''
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>manageAppVersionAndBuildNumber</key>
-  <false/>
-  <key>signingStyle</key>
-  <string>automatic</string>
-  <key>uploadBitcode</key>
-  <false/>
-  <key>method</key>
-  <string>$exportMethod</string>
-</dict>
-</plist>
-''';
-    final tempDir = Directory.systemTemp.createTempSync();
-    final exportPlistFile = File(p.join(tempDir.path, 'ExportOptions.plist'))
-      ..createSync(recursive: true)
-      ..writeAsStringSync(plistContents);
-    return exportPlistFile;
   }
 }

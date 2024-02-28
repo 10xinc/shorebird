@@ -5,13 +5,13 @@ import 'package:shorebird_cli/src/code_push_client_wrapper.dart';
 import 'package:shorebird_cli/src/command.dart';
 import 'package:shorebird_cli/src/config/config.dart';
 import 'package:shorebird_cli/src/doctor.dart';
-import 'package:shorebird_cli/src/ios.dart';
 import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/shorebird_artifact_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_build_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 import 'package:shorebird_cli/src/shorebird_flutter.dart';
 import 'package:shorebird_cli/src/shorebird_validator.dart';
+import 'package:shorebird_cli/src/validators/validators.dart';
 import 'package:shorebird_code_push_client/shorebird_code_push_client.dart';
 
 class ReleaseIosFrameworkCommand extends ShorebirdCommand
@@ -25,6 +25,10 @@ The version of the associated release (e.g. "1.0.0"). This should be the version
 of the iOS app that is using this module.''',
         mandatory: true,
       )
+      ..addOption(
+        'flutter-version',
+        help: 'The Flutter version to use when building the app (e.g: 3.16.3).',
+      )
       ..addFlag(
         'force',
         abbr: 'f',
@@ -34,11 +38,14 @@ of the iOS app that is using this module.''',
   }
 
   @override
-  String get description =>
-      'Builds and submits your iOS framework to Shorebird.';
+  String get name => 'ios-framework';
 
   @override
-  String get name => 'ios-framework-alpha';
+  List<String> get aliases => ['ios-framework-alpha'];
+
+  @override
+  String get description =>
+      'Builds and submits your iOS framework to Shorebird.';
 
   @override
   Future<int> run() async {
@@ -46,17 +53,19 @@ of the iOS app that is using this module.''',
       await shorebirdValidator.validatePreconditions(
         checkUserIsAuthenticated: true,
         checkShorebirdInitialized: true,
-        validators: doctor.iosCommandValidators,
         supportedOperatingSystems: {Platform.macOS},
+        validators: [
+          ...doctor.iosCommandValidators,
+          ShorebirdFlutterVersionSupportsIOSValidator(),
+        ],
       );
     } on PreconditionFailedException catch (e) {
       return e.exitCode.code;
     }
 
-    showiOSStatusWarning();
-
     const releasePlatform = ReleasePlatform.ios;
     final releaseVersion = results['release-version'] as String;
+    final flutterVersion = results['flutter-version'] as String?;
     final shorebirdYaml = shorebirdEnv.getShorebirdYaml()!;
     final appId = shorebirdYaml.getAppId();
     final app = await codePushClientWrapper.getApp(appId: appId);
@@ -72,23 +81,70 @@ of the iOS app that is using this module.''',
       );
     }
 
-    final buildProgress = logger.progress('Building iOS framework');
+    var flutterRevision = shorebirdEnv.flutterRevision;
+    if (flutterVersion != null) {
+      final String? revision;
+      try {
+        revision = await shorebirdFlutter.getRevisionForVersion(
+          flutterVersion,
+        );
+      } catch (error) {
+        logger.err(
+          '''
+Unable to determine revision for Flutter version: $flutterVersion.
+$error''',
+        );
+        return ExitCode.software.code;
+      }
+
+      if (revision == null) {
+        final openIssueLink = link(
+          uri: Uri.parse(
+            'https://github.com/shorebirdtech/shorebird/issues/new?assignees=&labels=feature&projects=&template=feature_request.md&title=feat%3A+',
+          ),
+          message: 'open an issue',
+        );
+        logger.err('''
+Version $flutterVersion not found. Please $openIssueLink to request a new version.
+Use `shorebird flutter versions list` to list available versions.
+''');
+        return ExitCode.software.code;
+      }
+
+      flutterRevision = revision;
+    }
+
+    final originalFlutterRevision = shorebirdEnv.flutterRevision;
+    final switchFlutterRevision = flutterRevision != originalFlutterRevision;
+
+    if (switchFlutterRevision) {
+      await shorebirdFlutter.useRevision(revision: flutterRevision);
+    }
+
+    final flutterVersionString = await shorebirdFlutter.getVersionAndRevision();
+
+    final buildProgress = logger.progress(
+      'Building iOS framework with Flutter $flutterVersionString',
+    );
 
     try {
       await buildIosFramework();
     } catch (error) {
       buildProgress.fail('Failed to build iOS framework: $error');
       return ExitCode.software.code;
+    } finally {
+      if (switchFlutterRevision) {
+        await shorebirdFlutter.useRevision(revision: originalFlutterRevision);
+      }
     }
 
     buildProgress.complete();
 
-    final flutterVersion = await shorebirdFlutter.getVersionAndRevision();
     final summary = [
       '''📱 App: ${lightCyan.wrap(app.displayName)} ${lightCyan.wrap('($appId)')}''',
       '📦 Release Version: ${lightCyan.wrap(releaseVersion)}',
       '''🕹️  Platform: ${lightCyan.wrap(releasePlatform.name)}''',
-      '🐦 Flutter Version: ${lightCyan.wrap(flutterVersion)}',
+      '🐦 Flutter Version: ${lightCyan.wrap(flutterVersionString)}',
     ];
 
     logger.info('''

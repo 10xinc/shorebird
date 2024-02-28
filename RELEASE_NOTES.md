@@ -2,6 +2,170 @@
 
 This section contains past updates we've sent to customers via Discord.
 
+## 0.26.1 (February 26, 2024)
+
+🆕 Updated to Flutter 3.19.1.
+🪟 Fixed `shorebird patch` failing on some Windows installs (missing .dll).
+☁️ Added Microsoft login to `shorebird login` and console.shorebird.dev.
+
+Microsoft login will show Shorebird as an "unverified" app for a few more
+days until our Microsoft Partner Program application completes.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.26.1
+
+## 0.26.0 (February 15, 2024)
+
+🆕 Updated to Flutter 3.19.0.
+🗑 Deprecated `flutter versions use` in favor of `shorebird release --flutter-version`.
+💥 Fixed a crash on iOS involving package:dio.
+
+The iOS crasher was caused by a subtle bug in the upstream Dart dill compiler,
+triggered by code in `package:dio`, which only executed when parsing json blobs
+larger than 50kb. The full fix required changes to upstream Dart which is why
+we waited until Flutter 3.19.0 to release this fix.
+
+We're now returning our focus to finishing 1.0. We believe this release to be
+stable and safe to use on iOS and Android. Please let us know if you encounter
+any issues!
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.26.0
+
+## 0.25.2 (February 7, 2024)
+
+💥 Fixes a crash on iOS releases without a patch.
+🚑 Now publishing .dSYM files for iOS builds to help with crash reporting, see
+   https://docs.shorebird.dev/guides/crash-reporting for usage instructions.
+🪵 Fixed logs from Shorebird updater not appearing on iOS.
+
+We have received multiple reports of iOS builds crashing at 0xfffffffffffffffe.
+https://github.com/shorebirdtech/shorebird/issues/1700
+We expect this is a bug in our new iOS engine relating to `async`/`await`, but
+have not yet been able to reproduce this ourselves. We would *love* to work
+with you to debug this issue if you are seeing it.
+
+If you see any issues, please let us know!
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.25.2
+
+## 0.25.1 (February 5, 2024)
+
+- 🩹 Fixes an issue where our Flutter fork was reporting the incorrect version.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.25.1
+
+## 0.25.0 (February 1, 2024)
+
+🎉🎉🎉 **iOS IS NOW BETA!** 🎉🎉🎉
+
+📰 See our blog post at https://shorebird.dev/blogs/ios-beta/.
+
+This release includes:
+
+- 🐦 Support for Flutter 3.16.9.
+- 🦿 iOS hybrid app patches are now much faster (at parity with non-hybrid iOS patches).
+- 🩹 Fixes issues where `shorebird patch ios` might not work if an export options plist is required.
+- 🗑️ Dropped support for Flutter 3.16.4-3.16.7 on iOS due to crashes discovered in those versions.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.25.0
+
+## 0.24.1 (January 31, 2024)
+
+- iOS release builds now run at full speed. iOS patches remain slower than releases.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.24.1
+
+## 0.24.0 (January 30, 2024)
+
+This is our last planned release before iOS beta. We believe iOS is stable
+enough for general use. We plan to release beta later this week once we hear
+back from early adopters. iOS releases and patches are still slower than
+Android, but they will continue to get faster in the coming weeks.
+
+Please test and let us know if you encounter any issues!
+
+- iOS patches now run ~2x faster.
+- Fixed several crashers in the new iOS engine.
+- `shorebird -v` now shows all output from underlying commands, not just errors.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.24.0
+
+## 0.23.1 (January 25, 2024)
+
+- 🩹 Fixes iOS patch for Flutter version 3.16.5
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.23.1
+
+As always, you can upgrade using `shorebird upgrade`
+
+Please let us know if we can help!
+
+## 0.23.0 (January 24, 2024)
+
+This release includes a new iOS "linker" which allows running much more code on
+the CPU when patching on iOS. Some benchmarks improved 10-50x. We still have
+work to do before we declare 1.0, but we're very close now.
+
+This release contains fundamental changes as to how Dart executes and may
+still have instabilities we failed to catch in our testing.
+
+We recommend Shorebird users test apps and patches before distributing to users.
+`shorebird preview` can be used to test patches before releasing to users:
+https://docs.shorebird.dev/guides/staging-patches
+
+If you encounter problems, you can release with an older (known stable) iOS
+engine by running: `shorebird flutter versions use 3.16.4`
+
+- 🚀 Enabled new linker on iOS, improving Dart execution after patching.
+
+Known issues:
+
+- Obfuscated iOS builds fail to patch:
+  https://github.com/shorebirdtech/shorebird/issues/1619
+- Unpatched iOS builds are sometimes _slower_ than patched builds:
+  https://github.com/shorebirdtech/shorebird/issues/1661
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.23.0
+
+## 0.22.1 (January 23, 2024)
+
+- 🔍 Adds checks for `flavor` and `target` flags after the `--` separator.
+- 🩹 Fixes iOS patch crash when patching with older Flutter versions.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.22.2
+
+As always, you can upgrade using `shorebird upgrade`
+
+Please let us know if we can help!
+
+## 0.22.0 (January 18, 2024)
+
+This release focused on stabilizing the new iOS engine released in 0.20.0.
+We've squashed all known crashers. If you're seeing issues, please let us know!
+
+- ⬆️ Updated to Flutter 3.16.7
+- 💥 Fixed several crashers found in the new iOS engine.
+- ⚖️ Reduced memory usage on iOS by over 30mb.
+- 📉 Reduced iOS patch sizes by 10x -- now scale by amount changed rather than the size of the app.
+- 🩹 Fixed `shorebird ios-alpha patch` to work with older Flutter versions.
+- 🏃 Made `shorebird preview` faster on Android.
+- 🔍 Fixed sometimes failing to find `adb` on Windows.
+- 🧈 Fixed progress indicator hangs in `patch` command.
+- 🍎 Fixed errors in CupertinoSwitch (caused by bad merge with Flutter).
+
+If you encounter problems with the new iOS engine, you can use the older one by
+running: `shorebird flutter versions use 3.16.4`
+
+Known issues:
+
+- Obfuscated iOS builds fail to patch:
+  https://github.com/shorebirdtech/shorebird/issues/1619
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.22.0
+
+As always, you can upgrade using `shorebird upgrade`
+
+Please let us know if we can help!
+
 ## 0.21.1 (January 3, 2024)
 
 - 🩹 Fixes an issue where releasing iOS apps would fail when zipping an archive (https://github.com/shorebirdtech/shorebird/pull/1612)

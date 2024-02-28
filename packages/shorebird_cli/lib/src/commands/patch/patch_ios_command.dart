@@ -15,6 +15,7 @@ import 'package:shorebird_cli/src/deployment_track.dart';
 import 'package:shorebird_cli/src/doctor.dart';
 import 'package:shorebird_cli/src/engine_config.dart';
 import 'package:shorebird_cli/src/executables/executables.dart';
+import 'package:shorebird_cli/src/extensions/arg_results.dart';
 import 'package:shorebird_cli/src/formatters/file_size_formatter.dart';
 import 'package:shorebird_cli/src/ios.dart';
 import 'package:shorebird_cli/src/logger.dart';
@@ -27,55 +28,8 @@ import 'package:shorebird_cli/src/shorebird_flutter.dart';
 import 'package:shorebird_cli/src/shorebird_validator.dart';
 import 'package:shorebird_code_push_client/shorebird_code_push_client.dart';
 
-/// Revisions of Flutter that were released before the linker was enabled.
-const preLinkerFlutterRevisions = <String>{
-  '45d609090a2313d47a4e657d449ff25710abc853',
-  '0b0086ffa92c25c22f50cbadc3851054f08a9cd8',
-  'a3d5f7c614aa1cc4d6cb1506e74fd1c81678e68e',
-  'b7ad8d5759c4889ea323948fe589c69a39c26135',
-  '49b602f7fae8f5bcd8de9547f31928058cbd768e',
-  '6116674ab0d6449104f9f342d96cef0abe30a9a1',
-  'ba444de6ceb9313320a70563d7b6203344e0cd87',
-  '0671f4f9fb2589055d64537e03d7733448b3488b',
-  '1cf1fef6a503672b919a4390ed61320daac07139',
-  '5de12cedfe6002b79183bc59af04561a98c8aa82',
-  '9486b6431e6c808c4e131f134b5d88017b3c32ab',
-  '2e05c41803943a1e81360ae97c75a229c1fb55ef',
-  '0e2d280277cf9f60f7ba802a59f9fd187ffdd050',
-  '628a3eba4e0aba5e6f92c87b320f3c99afb85e61',
-  '3612c8dc659dd7866578b19396efcb63cad71bef',
-  'd84d466eacbeb47d6e81e960c22c6fdfe5a3917d',
-  '8576da53c568d904f464b8aeac105c8790285d32',
-  'd93eb3686c60b626691c8020d7353ea22a0f5ea2',
-  '39df2792f537b1fc62a9c668a6990f585bd91456',
-  '03e895ee09dfbb9c18681d103f4b27671ff65429',
-  'b9b23902966504a9778f4c07e3a3487fa84dcb2a',
-  '02454bae6bf3bef150171c9ce299279e8b875b2e',
-  '8861a600668dbc4d9ca131f5158871bc0523f428',
-  'ef4b661ddc0c71b738432ae59c6bc573e917854b',
-  '47db6d73cfe3227129a510445dd82c45c2dbe347',
-  '7b63f1bac9879c2b00f02bc8d404ffc4c7f24ca2',
-  '012153de178d4a51cd6f9adc792ad63ae3cfb1b3',
-  '83305b5088e6fe327fb3334a73ff190828d85713',
-  '225beb5302e2f03603a775d23be11d96ae253ab1',
-  '402424409c29c28ed69e14cbb39f0a7424a47e16',
-  'b27620fa7dca89c742c12b1277571f7a0d6a9740',
-  '447487a4d2f1a73376e82c61e708f75e315cdaa5',
-  'c0e52af9097e779671591ea105031920f24da4d5',
-  '211d78f6d673fdc6f728217c8f999827c040cd23',
-  'efce3391b9c729e2899e4e1383df718c4445c3ae',
-  '0f62afa7ad2eaa2fa44ff28278d6c6eaf81f327e',
-  '0fc414cbc33ee017ad509671009e8b242539ea16',
-  '6b9b5ff45af7a1ef864038dd7d0c32b620b357c6',
-  '7cd77f78a51576652edc337817152abf4217a257',
-  '5567fb431a2ddbb70c05ff7cd8fcd58bb91f2dbc',
-  '914d5b5fcacc794fd0319f2928ceb514e1e0da33',
-  'e744c831b8355bcb9f3b541d42431d9145eea677',
-  '1a6115bebe31e63508c312d14e69e973e1a59dbf',
-};
-
 /// {@template patch_ios_command}
-/// `shorebird patch ios-alpha` command.
+/// `shorebird patch ios` command.
 /// {@endtemplate}
 class PatchIosCommand extends ShorebirdCommand
     with ShorebirdBuildMixin, ShorebirdArtifactMixin {
@@ -127,7 +81,10 @@ If this option is not provided, the version number will be determined from the p
   }
 
   @override
-  String get name => 'ios-alpha';
+  String get name => 'ios';
+
+  @override
+  List<String> get aliases => ['ios-alpha'];
 
   @override
   String get description =>
@@ -162,14 +119,15 @@ If this option is not provided, the version number will be determined from the p
 
     const arch = 'aarch64';
     const releasePlatform = ReleasePlatform.ios;
-    final flavor = results['flavor'] as String?;
+    final flavor = results.findOption('flavor', argParser: argParser);
+    final target = results.findOption('target', argParser: argParser);
 
     final shorebirdYaml = shorebirdEnv.getShorebirdYaml()!;
     final appId = shorebirdYaml.getAppId(flavor: flavor);
     final app = await codePushClientWrapper.getApp(appId: appId);
 
     try {
-      await _buildPatch();
+      await _buildPatch(flavor: flavor, target: target);
     } catch (_) {
       return ExitCode.software.code;
     }
@@ -222,14 +180,14 @@ Please re-run the release command for this version or create a new release.''');
       return ExitCode.software.code;
     }
 
-    final originalFlutterRevision = shorebirdEnv.flutterRevision;
-    if (release.flutterRevision != originalFlutterRevision) {
+    final currentFlutterRevision = shorebirdEnv.flutterRevision;
+    if (release.flutterRevision != currentFlutterRevision) {
       logger.info('''
 
 The release you are trying to patch was built with a different version of Flutter.
 
 Release Flutter Revision: ${release.flutterRevision}
-Current Flutter Revision: $originalFlutterRevision
+Current Flutter Revision: $currentFlutterRevision
 ''');
 
       var flutterVersionProgress = logger.progress(
@@ -239,14 +197,14 @@ Current Flutter Revision: $originalFlutterRevision
       flutterVersionProgress.complete();
 
       try {
-        await _buildPatch();
+        await _buildPatch(flavor: flavor, target: target);
       } catch (_) {
         return ExitCode.software.code;
       } finally {
         flutterVersionProgress = logger.progress(
-          '''Switching back to original Flutter revision $originalFlutterRevision''',
+          '''Switching back to original Flutter revision $currentFlutterRevision''',
         );
-        await shorebirdFlutter.useRevision(revision: originalFlutterRevision);
+        await shorebirdFlutter.useRevision(revision: currentFlutterRevision);
         flutterVersionProgress.complete();
       }
     }
@@ -287,33 +245,35 @@ Current Flutter Revision: $originalFlutterRevision
       return ExitCode.software.code;
     }
 
+    final extractZip = artifactManager.extractZip;
+    final unzipProgress = logger.progress('Extracting release artifact');
+    final releaseXcarchivePath = await Isolate.run(() async {
+      final tempDir = Directory.systemTemp.createTempSync();
+      await extractZip(
+        zipFile: releaseArtifactZipFile,
+        outputDirectory: tempDir,
+      );
+      return tempDir.path;
+    });
+    unzipProgress.complete();
+    final appDirectory =
+        getAppDirectory(xcarchiveDirectory: Directory(releaseXcarchivePath));
+    if (appDirectory == null) {
+      logger.err('Unable to find release artifact .app directory');
+      return ExitCode.software.code;
+    }
+    final releaseArtifactFile = File(
+      p.join(
+        appDirectory.path,
+        'Frameworks',
+        'App.framework',
+        'App',
+      ),
+    );
+
     final useLinker = engineConfig.localEngine != null ||
         !preLinkerFlutterRevisions.contains(release.flutterRevision);
     if (useLinker) {
-      final extractZip = artifactManager.extractZip;
-      final unzipProgress = logger.progress('Extracting release artifact');
-      final releaseXcarchivePath = await Isolate.run(() async {
-        final tempDir = Directory.systemTemp.createTempSync();
-        await extractZip(
-          zipFile: releaseArtifactZipFile,
-          outputDirectory: tempDir,
-        );
-        return tempDir.path;
-      });
-      unzipProgress.complete();
-
-      final releaseArtifactFile = File(
-        p.join(
-          releaseXcarchivePath,
-          'Products',
-          'Applications',
-          'Runner.app',
-          'Frameworks',
-          'App.framework',
-          'App',
-        ),
-      );
-
       // Because aot-tools is versioned with the engine, we need to use the
       // original Flutter revision to link the patch. We have already switched
       // to and from the release's Flutter revision before and could
@@ -321,14 +281,14 @@ Current Flutter Revision: $originalFlutterRevision
       // but this approach makes it less likely that we will leave the user on
       // a different version of Flutter than they started with if something
       // goes wrong.
-      if (release.flutterRevision != originalFlutterRevision) {
+      if (release.flutterRevision != currentFlutterRevision) {
         await shorebirdFlutter.useRevision(revision: release.flutterRevision);
       }
       final exitCode = await _runLinker(
         releaseArtifact: releaseArtifactFile,
       );
-      if (release.flutterRevision != originalFlutterRevision) {
-        await shorebirdFlutter.useRevision(revision: originalFlutterRevision);
+      if (release.flutterRevision != currentFlutterRevision) {
+        await shorebirdFlutter.useRevision(revision: currentFlutterRevision);
       }
       if (exitCode != ExitCode.success.code) {
         return exitCode;
@@ -342,7 +302,38 @@ Current Flutter Revision: $originalFlutterRevision
       return ExitCode.success.code;
     }
 
-    final patchFile = File(useLinker ? _vmcodeOutputPath : _aotOutputPath);
+    final patchBuildFile = File(useLinker ? _vmcodeOutputPath : _aotOutputPath);
+    final File patchFile;
+    if (useLinker && await aotTools.isGeneratePatchDiffBaseSupported()) {
+      final patchBaseProgress = logger.progress('Generating patch diff base');
+      final analyzeSnapshotPath = shorebirdArtifacts.getArtifactPath(
+        artifact: ShorebirdArtifact.analyzeSnapshot,
+      );
+
+      final File patchBaseFile;
+      try {
+        // If the aot_tools executable supports the dump_blobs command, we
+        // can generate a stable diff base and use that to create a patch.
+        patchBaseFile = await aotTools.generatePatchDiffBase(
+          analyzeSnapshotPath: analyzeSnapshotPath,
+          releaseSnapshot: releaseArtifactFile,
+        );
+        patchBaseProgress.complete();
+      } catch (error) {
+        patchBaseProgress.fail('$error');
+        return ExitCode.software.code;
+      }
+
+      patchFile = File(
+        await artifactManager.createDiff(
+          releaseArtifactPath: patchBaseFile.path,
+          patchArtifactPath: patchBuildFile.path,
+        ),
+      );
+    } else {
+      patchFile = patchBuildFile;
+    }
+
     final patchFileSize = patchFile.statSync().size;
 
     final summary = [
@@ -384,7 +375,7 @@ ${summary.join('\n')}
         Arch.arm64: PatchArtifactBundle(
           arch: arch,
           path: patchFile.path,
-          hash: _hashFn(patchFile.readAsBytesSync()),
+          hash: _hashFn(patchBuildFile.readAsBytesSync()),
           size: patchFileSize,
         ),
       },
@@ -408,9 +399,10 @@ ${summary.join('\n')}
         'out.vmcode',
       );
 
-  Future<void> _buildPatch() async {
-    final target = results['target'] as String?;
-    final flavor = results['flavor'] as String?;
+  Future<void> _buildPatch({
+    required String? flavor,
+    required String? target,
+  }) async {
     final shouldCodesign = results['codesign'] == true;
     final buildProgress = logger.progress('Building patch');
     try {
@@ -465,6 +457,7 @@ ${summary.join('\n')}
         base: releaseArtifact.path,
         patch: patch.path,
         analyzeSnapshot: analyzeSnapshot.path,
+        outputPath: _vmcodeOutputPath,
         workingDirectory: _buildDirectory,
       );
     } catch (error) {

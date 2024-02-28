@@ -11,6 +11,7 @@ class User {
   const User({
     required this.id,
     required this.email,
+    required this.jwtIssuer,
     this.hasActiveSubscription = false,
     this.displayName,
     this.stripeCustomerId,
@@ -36,4 +37,7 @@ class User {
 
   /// The user's Stripe customer ID, if they have one.
   final String? stripeCustomerId;
+
+  /// The JWT issuer used to create the user.
+  final String jwtIssuer;
 }

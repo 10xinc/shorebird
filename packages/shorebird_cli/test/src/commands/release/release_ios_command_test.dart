@@ -17,6 +17,7 @@ import 'package:shorebird_cli/src/doctor.dart';
 import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/os/operating_system_interface.dart';
 import 'package:shorebird_cli/src/platform.dart';
+import 'package:shorebird_cli/src/shorebird_build_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
 import 'package:shorebird_cli/src/shorebird_flutter.dart';
 import 'package:shorebird_cli/src/shorebird_process.dart';
@@ -228,7 +229,6 @@ flutter:
           runInShell: any(named: 'runInShell'),
         ),
       ).thenAnswer((_) async => flutterBuildProcessResult);
-      when(() => argResults.rest).thenReturn([]);
       when(() => argResults['arch']).thenReturn(arch);
       when(() => argResults['codesign']).thenReturn(true);
       when(() => argResults['platform']).thenReturn(releasePlatform);
@@ -237,6 +237,8 @@ flutter:
       when(() => argResults['export-method']).thenReturn(
         ExportMethod.appStore.argName,
       );
+      when(() => argResults.rest).thenReturn([]);
+      when(() => argResults.wasParsed(any())).thenReturn(true);
       when(() => argResults.wasParsed('export-method')).thenReturn(false);
       when(() => auth.isAuthenticated).thenReturn(true);
       when(() => logger.progress(any())).thenReturn(progress);
@@ -309,6 +311,10 @@ flutter:
         ..testArgResults = argResults;
     });
 
+    test('supports alpha alias', () {
+      expect(command.aliases, contains('ios-alpha'));
+    });
+
     test('has a description', () {
       expect(command.description, isNotEmpty);
     });
@@ -331,10 +337,26 @@ flutter:
         () => shorebirdValidator.validatePreconditions(
           checkUserIsAuthenticated: true,
           checkShorebirdInitialized: true,
-          validators: [flutterValidator],
+          validators: any(named: 'validators'),
           supportedOperatingSystems: {Platform.macOS},
         ),
       ).called(1);
+    });
+
+    group('when obfuscate flag is passed', () {
+      setUp(() {
+        when(() => argResults.rest).thenReturn(['--obfuscate']);
+      });
+
+      test('prints error and exits with usage code', () async {
+        final exitCode = await runWithOverrides(command.run);
+
+        expect(exitCode, equals(ExitCode.usage.code));
+        verify(
+          () => logger
+              .err('Shorebird does not currently support obfuscation on iOS.'),
+        ).called(1);
+      });
     });
 
     group('when codesign is disabled', () {
@@ -530,7 +552,7 @@ flutter:
       setUp(() {
         when(() => argResults.wasParsed(exportMethodArgName)).thenReturn(true);
         when(() => argResults[exportMethodArgName])
-            .thenReturn(ExportMethod.enterprise.argName);
+            .thenReturn(ExportMethod.adHoc.argName);
         when(() => argResults[exportOptionsPlistArgName]).thenReturn(null);
       });
 
@@ -556,7 +578,7 @@ flutter:
         final exportOptionsPlist = Plist(file: exportOptionsPlistFile);
         expect(
           exportOptionsPlist.properties['method'],
-          ExportMethod.enterprise.argName,
+          ExportMethod.adHoc.argName,
         );
       });
     });
@@ -642,6 +664,76 @@ flutter:
           exportOptionsPlist.properties['method'],
           ExportMethod.appStore.argName,
         );
+      });
+    });
+
+    group('when flutter-version is provided', () {
+      const flutterVersion = '3.16.3';
+      setUp(() {
+        when(() => argResults['flutter-version']).thenReturn(flutterVersion);
+      });
+
+      group('when unable to determine flutter revision', () {
+        final exception = Exception('oops');
+        setUp(() {
+          when(
+            () => shorebirdFlutter.getRevisionForVersion(any()),
+          ).thenThrow(exception);
+        });
+
+        test('exits with code 70', () async {
+          final exitCode = await runWithOverrides(command.run);
+          expect(exitCode, equals(ExitCode.software.code));
+          verify(
+            () => logger.err(
+              '''
+Unable to determine revision for Flutter version: $flutterVersion.
+$exception''',
+            ),
+          ).called(1);
+        });
+      });
+
+      group('when flutter version is not supported', () {
+        setUp(() {
+          when(
+            () => shorebirdFlutter.getRevisionForVersion(any()),
+          ).thenAnswer((_) async => null);
+        });
+
+        test('exits with code 70', () async {
+          final exitCode = await runWithOverrides(command.run);
+          expect(exitCode, equals(ExitCode.software.code));
+          verify(
+            () => logger.err(
+              any(that: contains('Version $flutterVersion not found.')),
+            ),
+          ).called(1);
+        });
+      });
+
+      group('when flutter version is supported', () {
+        const revision = '771d07b2cf';
+        setUp(() {
+          when(
+            () => shorebirdFlutter.getRevisionForVersion(any()),
+          ).thenAnswer((_) async => revision);
+          when(
+            () => shorebirdFlutter.useRevision(
+              revision: any(named: 'revision'),
+            ),
+          ).thenAnswer((_) async {});
+        });
+
+        test(
+            'uses specified flutter version to build '
+            'and reverts to original flutter version', () async {
+          await runWithOverrides(command.run);
+          verifyInOrder([
+            () => shorebirdFlutter.useRevision(revision: revision),
+            () => shorebirdFlutter.useRevision(revision: flutterRevision),
+          ]);
+        });
       });
     });
 

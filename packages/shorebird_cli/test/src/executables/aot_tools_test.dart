@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:mason_logger/mason_logger.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:scoped/scoped.dart';
 import 'package:shorebird_cli/src/cache.dart';
@@ -44,22 +45,28 @@ void main() {
 
       when(() => cache.updateAll()).thenAnswer((_) async {});
       when(() => shorebirdEnv.dartBinaryFile).thenReturn(dartBinaryFile);
+      when(
+        () => shorebirdArtifacts.getArtifactPath(
+          artifact: ShorebirdArtifact.aotTools,
+        ),
+      ).thenReturn('aot-tools.dill');
     });
 
     group('link', () {
       const base = './path/to/base.aot';
       const patch = './path/to/patch.aot';
       const analyzeSnapshot = './path/to/analyze_snapshot.aot';
+      const outputPath = './path/to/out.vmcode';
 
       test('throws Exception when process exits with non-zero code', () async {
         when(
           () => shorebirdArtifacts.getArtifactPath(
             artifact: ShorebirdArtifact.aotTools,
           ),
-        ).thenReturn('aot-tools');
+        ).thenReturn('aot-tools.dill');
         when(
           () => process.run(
-            any(),
+            dartBinaryFile.path,
             any(),
             workingDirectory: any(named: 'workingDirectory'),
           ),
@@ -76,6 +83,7 @@ void main() {
               base: base,
               patch: patch,
               analyzeSnapshot: analyzeSnapshot,
+              outputPath: outputPath,
             ),
           ),
           throwsA(
@@ -88,8 +96,8 @@ void main() {
         );
       });
 
-      group('when aot-tools is a kernel file', () {
-        const aotToolsPath = 'aot_tools.dill';
+      group('when aot-tools is an executable', () {
+        const aotToolsPath = 'aot_tools';
 
         setUp(() {
           when(
@@ -102,7 +110,7 @@ void main() {
         test('links and exits with code 0', () async {
           when(
             () => process.run(
-              any(),
+              aotToolsPath,
               any(),
               workingDirectory: any(named: 'workingDirectory'),
             ),
@@ -120,6 +128,60 @@ void main() {
                 patch: patch,
                 analyzeSnapshot: analyzeSnapshot,
                 workingDirectory: workingDirectory.path,
+                outputPath: outputPath,
+              ),
+            ),
+            completes,
+          );
+          verify(
+            () => process.run(
+              aotToolsPath,
+              [
+                'link',
+                '--base=$base',
+                '--patch=$patch',
+                '--analyze-snapshot=$analyzeSnapshot',
+                '--output=$outputPath',
+              ],
+              workingDirectory: any(named: 'workingDirectory'),
+            ),
+          ).called(1);
+        });
+      });
+
+      group('when aot-tools is a kernel file', () {
+        const aotToolsPath = 'aot_tools.dill';
+
+        setUp(() {
+          when(
+            () => shorebirdArtifacts.getArtifactPath(
+              artifact: ShorebirdArtifact.aotTools,
+            ),
+          ).thenReturn(aotToolsPath);
+        });
+
+        test('links and exits with code 0', () async {
+          when(
+            () => process.run(
+              dartBinaryFile.path,
+              any(),
+              workingDirectory: any(named: 'workingDirectory'),
+            ),
+          ).thenAnswer(
+            (_) async => const ShorebirdProcessResult(
+              exitCode: 0,
+              stdout: '',
+              stderr: '',
+            ),
+          );
+          await expectLater(
+            runWithOverrides(
+              () => aotTools.link(
+                base: base,
+                patch: patch,
+                analyzeSnapshot: analyzeSnapshot,
+                workingDirectory: workingDirectory.path,
+                outputPath: outputPath,
               ),
             ),
             completes,
@@ -128,11 +190,13 @@ void main() {
             () => process.run(
               dartBinaryFile.path,
               [
+                'run',
                 aotToolsPath,
                 'link',
                 '--base=$base',
                 '--patch=$patch',
                 '--analyze-snapshot=$analyzeSnapshot',
+                '--output=$outputPath',
               ],
               workingDirectory: any(named: 'workingDirectory'),
             ),
@@ -172,6 +236,7 @@ void main() {
                 patch: patch,
                 analyzeSnapshot: analyzeSnapshot,
                 workingDirectory: workingDirectory.path,
+                outputPath: outputPath,
               ),
             ),
             completes,
@@ -180,15 +245,215 @@ void main() {
             () => process.run(
               dartBinaryFile.path,
               [
+                'run',
                 aotToolsPath,
                 'link',
                 '--base=$base',
                 '--patch=$patch',
                 '--analyze-snapshot=$analyzeSnapshot',
+                '--output=$outputPath',
               ],
               workingDirectory: any(named: 'workingDirectory'),
             ),
           ).called(1);
+        });
+      });
+    });
+
+    group('isGeneratePatchDiffBaseSupported', () {
+      var stdout = '';
+      setUp(() {
+        when(
+          () => process.run(
+            dartBinaryFile.path,
+            any(),
+            workingDirectory: any(named: 'workingDirectory'),
+          ),
+        ).thenAnswer(
+          (_) async => ShorebirdProcessResult(
+            exitCode: ExitCode.success.code,
+            stdout: stdout,
+            stderr: '',
+          ),
+        );
+      });
+
+      group('when dump_blobs flag is not recognized', () {
+        setUp(() {
+          stdout = '''
+Dart equivalent of bintools
+
+Usage: aot_tools <command> [arguments]
+
+Global options:
+-h, --help       Print this usage information.
+-v, --verbose    Noisy logging.
+
+Available commands:
+  link   Link two aot snapshots.
+
+Run "aot_tools help <command>" for more information about a command.
+''';
+        });
+
+        test('returns false', () async {
+          final result = await runWithOverrides(
+            () => aotTools.isGeneratePatchDiffBaseSupported(),
+          );
+          expect(result, isFalse);
+        });
+      });
+
+      group('when dump_blobs is recognized', () {
+        setUp(() {
+          stdout = '''
+Dart equivalent of bintools
+
+Usage: aot_tools <command> [arguments]
+
+Global options:
+-h, --help            Print this usage information.
+-v, --[no-]verbose    Noisy logging.
+
+Available commands:
+  dump_blobs              Reads the isolate and vm snapshot data from an aot snapshot file, concatenates them, and writes them to the specified out path.
+  dump_linker_overrides   Statically analyzes dart code and dumps the overrides to the specified output path.
+  link                    Link two aot snapshots.
+
+Run "aot_tools help <command>" for more information about a command.
+''';
+        });
+
+        test('returns true', () async {
+          final result = await runWithOverrides(
+            () => aotTools.isGeneratePatchDiffBaseSupported(),
+          );
+          expect(result, isTrue);
+        });
+      });
+    });
+
+    group('generatePatchDiffBase', () {
+      setUp(() {
+        when(
+          () => process.run(
+            any(),
+            any(),
+            workingDirectory: any(named: 'workingDirectory'),
+          ),
+        ).thenAnswer(
+          (_) async => const ShorebirdProcessResult(
+            exitCode: 0,
+            stdout: '',
+            stderr: 'error',
+          ),
+        );
+      });
+
+      group('when command returns non-zero exit code', () {
+        setUp(() {
+          when(
+            () => process.run(
+              any(),
+              any(),
+              workingDirectory: any(named: 'workingDirectory'),
+            ),
+          ).thenAnswer(
+            (_) async => const ShorebirdProcessResult(
+              exitCode: 1,
+              stdout: '',
+              stderr: 'error',
+            ),
+          );
+        });
+
+        test('throws exception', () async {
+          await expectLater(
+            () => runWithOverrides(
+              () => aotTools.generatePatchDiffBase(
+                releaseSnapshot: File('release_snapshot'),
+                analyzeSnapshotPath: 'analyze_snapshot',
+              ),
+            ),
+            throwsA(
+              isA<Exception>().having(
+                (e) => '$e',
+                'exception',
+                'Exception: Failed to generate patch diff base: error',
+              ),
+            ),
+          );
+        });
+      });
+
+      group('when out file does not exist', () {
+        setUp(() {
+          when(
+            () => process.run(
+              any(),
+              any(),
+              workingDirectory: any(named: 'workingDirectory'),
+            ),
+          ).thenAnswer(
+            (_) async => const ShorebirdProcessResult(
+              exitCode: 0,
+              stdout: '',
+              stderr: '',
+            ),
+          );
+        });
+
+        test('throws exception', () async {
+          await expectLater(
+            () => runWithOverrides(
+              () => aotTools.generatePatchDiffBase(
+                releaseSnapshot: File('release_snapshot'),
+                analyzeSnapshotPath: 'analyze_snapshot',
+              ),
+            ),
+            throwsA(
+              isA<Exception>().having(
+                (e) => '$e',
+                'exception',
+                '''Exception: Failed to generate patch diff base: output file does not exist''',
+              ),
+            ),
+          );
+        });
+      });
+
+      group('when out file is created', () {
+        setUp(() {
+          when(
+            () => process.run(
+              any(),
+              any(),
+              workingDirectory: any(named: 'workingDirectory'),
+            ),
+          ).thenAnswer((invocation) async {
+            final outArgument =
+                (invocation.positionalArguments.last as List<String>)
+                    .firstWhere((String element) => element.startsWith('--out'))
+                    .split('=')
+                    .last;
+            File(outArgument).createSync(recursive: true);
+            return const ShorebirdProcessResult(
+              exitCode: 0,
+              stdout: '',
+              stderr: '',
+            );
+          });
+        });
+
+        test('returns path to file', () async {
+          final result = await runWithOverrides(
+            () => aotTools.generatePatchDiffBase(
+              releaseSnapshot: File('release_snapshot'),
+              analyzeSnapshotPath: 'analyze_snapshot',
+            ),
+          );
+
+          expect(result.existsSync(), isTrue);
         });
       });
     });

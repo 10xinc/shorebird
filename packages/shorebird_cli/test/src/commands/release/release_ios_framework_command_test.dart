@@ -225,6 +225,10 @@ flutter:
         ..testArgResults = argResults;
     });
 
+    test('supports alpha alias', () {
+      expect(command.aliases, contains('ios-framework-alpha'));
+    });
+
     test('has a description', () {
       expect(command.description, isNotEmpty);
     });
@@ -247,10 +251,80 @@ flutter:
         () => shorebirdValidator.validatePreconditions(
           checkUserIsAuthenticated: true,
           checkShorebirdInitialized: true,
-          validators: [flutterValidator],
+          validators: any(named: 'validators'),
           supportedOperatingSystems: {Platform.macOS},
         ),
       ).called(1);
+    });
+
+    group('when flutter-version is provided', () {
+      const flutterVersion = '3.16.3';
+      setUp(() {
+        when(() => argResults['flutter-version']).thenReturn(flutterVersion);
+      });
+
+      group('when unable to determine flutter revision', () {
+        final exception = Exception('oops');
+        setUp(() {
+          when(
+            () => shorebirdFlutter.getRevisionForVersion(any()),
+          ).thenThrow(exception);
+        });
+
+        test('exits with code 70', () async {
+          final exitCode = await runWithOverrides(command.run);
+          expect(exitCode, equals(ExitCode.software.code));
+          verify(
+            () => logger.err(
+              '''
+Unable to determine revision for Flutter version: $flutterVersion.
+$exception''',
+            ),
+          ).called(1);
+        });
+      });
+
+      group('when flutter version is not supported', () {
+        setUp(() {
+          when(
+            () => shorebirdFlutter.getRevisionForVersion(any()),
+          ).thenAnswer((_) async => null);
+        });
+
+        test('exits with code 70', () async {
+          final exitCode = await runWithOverrides(command.run);
+          expect(exitCode, equals(ExitCode.software.code));
+          verify(
+            () => logger.err(
+              any(that: contains('Version $flutterVersion not found.')),
+            ),
+          ).called(1);
+        });
+      });
+
+      group('when flutter version is supported', () {
+        const revision = '771d07b2cf';
+        setUp(() {
+          when(
+            () => shorebirdFlutter.getRevisionForVersion(any()),
+          ).thenAnswer((_) async => revision);
+          when(
+            () => shorebirdFlutter.useRevision(
+              revision: any(named: 'revision'),
+            ),
+          ).thenAnswer((_) async {});
+        });
+
+        test(
+            'uses specified flutter version to build '
+            'and reverts to original flutter version', () async {
+          await runWithOverrides(command.run);
+          verifyInOrder([
+            () => shorebirdFlutter.useRevision(revision: revision),
+            () => shorebirdFlutter.useRevision(revision: flutterRevision),
+          ]);
+        });
+      });
     });
 
     test('exits with code 70 when build fails with non-zero exit code',

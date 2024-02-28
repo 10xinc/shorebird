@@ -142,9 +142,7 @@ void main() {
       const directory = 'repository';
       test('executes correct command', () async {
         await expectLater(
-          runWithOverrides(
-            () => git.fetch(directory: directory),
-          ),
+          runWithOverrides(() => git.fetch(directory: directory)),
           completes,
         );
         verify(
@@ -159,9 +157,7 @@ void main() {
       test('executes correct command w/args', () async {
         final args = ['--tags'];
         await expectLater(
-          runWithOverrides(
-            () => git.fetch(directory: directory, args: args),
-          ),
+          runWithOverrides(() => git.fetch(directory: directory, args: args)),
           completes,
         );
         verify(
@@ -321,6 +317,58 @@ origin/flutter_release/3.10.6''';
               revision: revision,
             ),
           ),
+          throwsA(
+            isA<ProcessException>().having((e) => e.message, 'message', error),
+          ),
+        );
+      });
+    });
+
+    group('remote', () {
+      const directory = './output';
+
+      test('executes correct command', () async {
+        await expectLater(
+          runWithOverrides(
+            () => git.remote(directory: directory),
+          ),
+          completes,
+        );
+        verify(
+          () => process.run(
+            'git',
+            ['remote'],
+            workingDirectory: directory,
+          ),
+        ).called(1);
+      });
+
+      test('executes correct command w/args', () async {
+        const args = ['prune', 'origin'];
+        await expectLater(
+          runWithOverrides(
+            () => git.remote(
+              directory: directory,
+              args: args,
+            ),
+          ),
+          completes,
+        );
+        verify(
+          () => process.run(
+            'git',
+            ['remote', ...args],
+            workingDirectory: directory,
+          ),
+        ).called(1);
+      });
+
+      test('throws ProcessException if process exits with error', () async {
+        const error = 'oops';
+        when(() => processResult.exitCode).thenReturn(ExitCode.software.code);
+        when(() => processResult.stderr).thenReturn(error);
+        expect(
+          () => runWithOverrides(() => git.remote(directory: directory)),
           throwsA(
             isA<ProcessException>().having((e) => e.message, 'message', error),
           ),

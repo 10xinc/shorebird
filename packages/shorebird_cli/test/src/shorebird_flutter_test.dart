@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:mason_logger/mason_logger.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:path/path.dart' as p;
+import 'package:pub_semver/pub_semver.dart';
 import 'package:scoped/scoped.dart';
 import 'package:shorebird_cli/src/executables/executables.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
@@ -184,7 +185,80 @@ Tools • Dart 3.0.6 • DevTools 2.23.1''');
       });
     });
 
-    group('getVersion', () {
+    group('getRevisionForVersion', () {
+      const version = '3.16.3';
+
+      test('throws exception when process exits with non-zero code', () async {
+        const exception = ProcessException('git', ['rev-parse']);
+        when(
+          () => git.revParse(
+            revision: any(named: 'revision'),
+            directory: any(named: 'directory'),
+          ),
+        ).thenThrow(exception);
+        await expectLater(
+          runWithOverrides(
+            () => shorebirdFlutter.getRevisionForVersion(version),
+          ),
+          throwsA(exception),
+        );
+        verify(
+          () => git.revParse(
+            revision: 'refs/remotes/origin/flutter_release/$version',
+            directory: any(named: 'directory'),
+          ),
+        ).called(1);
+      });
+
+      test('returns null when cannot parse revision', () async {
+        when(
+          () => git.revParse(
+            revision: any(named: 'revision'),
+            directory: any(named: 'directory'),
+          ),
+        ).thenAnswer((_) async => '');
+        await expectLater(
+          runWithOverrides(
+            () => shorebirdFlutter.getRevisionForVersion(version),
+          ),
+          completion(isNull),
+        );
+        verify(
+          () => git.revParse(
+            revision: 'refs/remotes/origin/flutter_release/$version',
+            directory: any(named: 'directory'),
+          ),
+        ).called(1);
+      });
+
+      test('returns revision when able to parse the string', () async {
+        const revision = '771d07b2cf97cf107bae6eeedcf41bdc9db772fa';
+        when(
+          () => git.revParse(
+            revision: any(named: 'revision'),
+            directory: any(named: 'directory'),
+          ),
+        ).thenAnswer(
+          (_) async => '''
+$revision
+        ''',
+        );
+        await expectLater(
+          runWithOverrides(
+            () => shorebirdFlutter.getRevisionForVersion(version),
+          ),
+          completion(equals(revision)),
+        );
+        verify(
+          () => git.revParse(
+            revision: 'refs/remotes/origin/flutter_release/$version',
+            directory: any(named: 'directory'),
+          ),
+        ).called(1);
+      });
+    });
+
+    group('getVersionString', () {
       test('throws ProcessException when process exits with non-zero code',
           () async {
         const error = 'oops';
@@ -209,7 +283,7 @@ Tools • Dart 3.0.6 • DevTools 2.23.1''');
           ),
         );
         await expectLater(
-          runWithOverrides(shorebirdFlutter.getVersion),
+          runWithOverrides(shorebirdFlutter.getVersionString),
           throwsA(isA<ProcessException>()),
         );
         verify(
@@ -232,7 +306,7 @@ Tools • Dart 3.0.6 • DevTools 2.23.1''');
           ),
         ).thenAnswer((_) async => '');
         await expectLater(
-          runWithOverrides(shorebirdFlutter.getVersion),
+          runWithOverrides(shorebirdFlutter.getVersionString),
           completion(isNull),
         );
         verify(
@@ -247,7 +321,7 @@ Tools • Dart 3.0.6 • DevTools 2.23.1''');
 
       test('returns version when able to parse the string', () async {
         await expectLater(
-          runWithOverrides(shorebirdFlutter.getVersion),
+          runWithOverrides(shorebirdFlutter.getVersionString),
           completion(equals('3.10.6')),
         );
         verify(
@@ -258,6 +332,68 @@ Tools • Dart 3.0.6 • DevTools 2.23.1''');
             pattern: 'refs/remotes/origin/flutter_release/*',
           ),
         ).called(1);
+      });
+    });
+
+    group('getVersion', () {
+      group('when getVersionString returns null', () {
+        setUp(() {
+          when(
+            () => git.forEachRef(
+              directory: any(named: 'directory'),
+              contains: any(named: 'contains'),
+              format: any(named: 'format'),
+              pattern: any(named: 'pattern'),
+            ),
+          ).thenAnswer((_) async => '');
+        });
+
+        test('returns null', () {
+          expect(
+            runWithOverrides(shorebirdFlutter.getVersion),
+            completion(isNull),
+          );
+        });
+      });
+
+      group('when getVersionStringReturns an invalid string', () {
+        setUp(() {
+          when(
+            () => git.forEachRef(
+              directory: any(named: 'directory'),
+              contains: any(named: 'contains'),
+              format: any(named: 'format'),
+              pattern: any(named: 'pattern'),
+            ),
+          ).thenAnswer((_) async => 'not a version');
+        });
+
+        test('returns null', () {
+          expect(
+            runWithOverrides(shorebirdFlutter.getVersion),
+            completion(isNull),
+          );
+        });
+      });
+
+      group('when getVersionStringReturns a valid string', () {
+        setUp(() {
+          when(
+            () => git.forEachRef(
+              directory: any(named: 'directory'),
+              contains: any(named: 'contains'),
+              format: any(named: 'format'),
+              pattern: any(named: 'pattern'),
+            ),
+          ).thenAnswer((_) async => '3.10.6');
+        });
+
+        test('returns the version', () {
+          expect(
+            runWithOverrides(shorebirdFlutter.getVersion),
+            completion(equals(Version(3, 10, 6))),
+          );
+        });
       });
     });
 
@@ -423,7 +559,7 @@ origin/flutter_release/3.10.6''';
     group('isPorcelain', () {
       test('returns true when status is empty', () async {
         await expectLater(
-          runWithOverrides(() => shorebirdFlutter.isPorcelain()),
+          runWithOverrides(() => shorebirdFlutter.isUnmodified()),
           completion(isTrue),
         );
         verify(
@@ -442,7 +578,7 @@ origin/flutter_release/3.10.6''';
           ),
         ).thenAnswer((_) async => 'M some/file');
         await expectLater(
-          runWithOverrides(() => shorebirdFlutter.isPorcelain()),
+          runWithOverrides(() => shorebirdFlutter.isUnmodified()),
           completion(isFalse),
         );
         verify(
@@ -471,7 +607,7 @@ origin/flutter_release/3.10.6''';
         );
 
         expect(
-          runWithOverrides(() => shorebirdFlutter.isPorcelain()),
+          runWithOverrides(() => shorebirdFlutter.isUnmodified()),
           throwsA(
             isA<ProcessException>().having(
               (e) => e.message,

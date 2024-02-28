@@ -89,7 +89,11 @@ void main() {
     });
 
     group('getCurrentUser', () {
-      const user = User(id: 123, email: 'tester@shorebird.dev');
+      const user = User(
+        id: 123,
+        email: 'tester@shorebird.dev',
+        jwtIssuer: 'https://accounts.google.com',
+      );
 
       test('makes the correct request', () async {
         codePushClient.getCurrentUser().ignore();
@@ -1110,6 +1114,8 @@ void main() {
         id: 1,
         email: 'tester@shorebird.dev',
         displayName: userName,
+        jwtIssuer:
+            'https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0',
       );
 
       test('makes the correct request', () async {

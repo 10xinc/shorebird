@@ -5,29 +5,21 @@ import 'dart:typed_data';
 import 'package:clock/clock.dart';
 import 'package:http/http.dart' as http;
 import 'package:jwt/jwt.dart';
+import 'package:jwt/src/models/public_key_store/public_key_store.dart';
 import 'package:meta/meta.dart';
 import 'package:pointycastle/pointycastle.dart';
 import 'package:rsa_pkcs/rsa_pkcs.dart' as rsa;
+import 'package:ttl_cache/ttl_cache.dart';
 
-/// {@template public_key_store}
-/// A store for the public keys.
-/// {@endtemplate}
-class PublicKeyStore {
-  /// {@macro public_key_store}
-  const PublicKeyStore({required this.keys, required this.expiration});
+/// A mapping of URLs to the public keys they contain.
+/// Example URL: https://login.microsoftonline.com/common/discovery/v2.0/keys
+@visibleForTesting
+final publicKeyStores = TtlCache<String, PublicKeyStore>();
 
-  /// Map of all public key id/value pairs.
-  final Map<String, String> keys;
-
-  /// Expiration time.
-  final DateTime expiration;
-}
-
-PublicKeyStore? _publicKeyStore;
-
-Future<Map<String, String>> _getPublicKeys(String url) async {
-  if (_publicKeyStore?.expiration.isAfter(clock.now()) ?? false) {
-    return _publicKeyStore!.keys;
+Future<PublicKeyStore?> _getPublicKeys(String url) async {
+  final store = publicKeyStores.get(url);
+  if (store != null) {
+    return store;
   }
 
   final get = getOverride ?? http.get;
@@ -39,19 +31,23 @@ Future<Map<String, String>> _getPublicKeys(String url) async {
   final maxAgeRegExp = RegExp(r'max-age=(\d+)');
   final match = maxAgeRegExp.firstMatch(response.headers['cache-control']!);
   final maxAge = int.parse(match!.group(1)!);
-  final publicKeys = (json.decode(response.body) as Map<String, dynamic>)
-      .cast<String, String>();
 
-  _publicKeyStore = PublicKeyStore(
-    keys: publicKeys,
-    expiration: clock.now().add(Duration(seconds: maxAge)),
+  final publicKeyStore = PublicKeyStore.tryDeserialize(
+    json.decode(response.body) as Map<String, dynamic>,
   );
 
-  return publicKeys;
-}
+  if (publicKeyStore == null) {
+    return null;
+  }
 
-/// Typedef for a function that returns the public keys asynchronously.
-typedef GetPublicKeys = Future<Map<String, String>> Function();
+  publicKeyStores.set(
+    url,
+    publicKeyStore,
+    ttl: Duration(seconds: maxAge),
+  );
+
+  return publicKeyStore;
+}
 
 /// {@template jwt_verification_failure}
 /// An exception thrown during JWT verification.
@@ -67,61 +63,46 @@ class JwtVerificationFailure implements Exception {
   String toString() => 'JwtVerificationFailure: $reason';
 }
 
-/// Verify the provided [jwt].
+/// Verify the encoded [encodedJwt].
 Future<Jwt> verify(
-  String jwt, {
+  String encodedJwt, {
   required String issuer,
   required Set<String> audience,
   required String publicKeysUrl,
 }) async {
-  final parts = jwt.split('.');
-
-  if (parts.length != 3) {
-    throw const JwtVerificationFailure('JWT is malformed');
+  final Jwt jwt;
+  try {
+    jwt = Jwt.parse(encodedJwt);
+  } on FormatException catch (e) {
+    throw JwtVerificationFailure(e.message);
   }
 
   final publicKeys = await _getPublicKeys(publicKeysUrl);
-
-  final JwtHeader header;
-  try {
-    header = JwtHeader.fromJson(_decodePart(parts[0]));
-  } catch (_) {
-    throw const JwtVerificationFailure('JWT header is malformed.');
+  if (publicKeys == null) {
+    throw JwtVerificationFailure(
+      'Invalid public keys returned by $publicKeysUrl.',
+    );
   }
-  await _verifyHeader(header, publicKeys);
 
-  final JwtPayload payload;
-  try {
-    payload = JwtPayload.fromJson(_decodePart(parts[1]));
-  } catch (_) {
-    throw const JwtVerificationFailure('JWT payload is malformed.');
-  }
-  _verifyPayload(payload, issuer, audience);
+  await _verifyHeader(jwt.header, publicKeys.keyIds);
+  _verifyPayload(jwt.payload, issuer, audience);
 
-  final isValid = _verifySignature(jwt, publicKeys[header.kid]!);
+  // By using this keystore's key IDs to validate the header above, we've
+  // guaranteed that there is a public key for this key ID.
+  final publicKey = publicKeys.getPublicKey(jwt.header.kid)!;
+
+  final isValid = _verifySignature(encodedJwt, publicKey);
   if (!isValid) {
     throw const JwtVerificationFailure('Invalid signature.');
   }
 
-  return Jwt(
-    header: header,
-    payload: payload,
-    signature: parts[2],
-    claims: _decodePart(parts[1]),
-  );
-}
-
-Map<String, dynamic> _decodePart(String part) {
-  final normalized = base64.normalize(part);
-  final base64Decoded = base64.decode(normalized);
-  final utf8Decoded = utf8.decode(base64Decoded);
-  final jsonDecoded = json.decode(utf8Decoded) as Map<String, dynamic>;
-  return jsonDecoded;
+  // If we've made it this far, the JWT is now verified.
+  return jwt;
 }
 
 Future<void> _verifyHeader(
   JwtHeader header,
-  Map<String, dynamic> publicKeys,
+  Iterable<String> keyIds,
 ) async {
   if (header.typ != 'JWT') {
     throw const JwtVerificationFailure('Invalid token type.');
@@ -131,7 +112,7 @@ Future<void> _verifyHeader(
     throw const JwtVerificationFailure('Invalid algorithm.');
   }
 
-  if (!publicKeys.containsKey(header.kid)) {
+  if (!keyIds.contains(header.kid)) {
     throw const JwtVerificationFailure('Invalid key id.');
   }
 }

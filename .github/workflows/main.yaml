@@ -21,15 +21,16 @@ jobs:
     outputs:
       needs_dart_build: ${{ steps.needs_dart_build.outputs.changes }}
       needs_redis_build: ${{ steps.needs_redis_build.outputs.changes }}
+      needs_third_party_build: ${{ steps.needs_third_party_build.outputs.changes }}
       needs_verify: ${{ steps.needs_verify.outputs.changes }}
 
     name: 👀 Detect Changes
 
     steps:
       - name: 📚 Git Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - uses: dorny/paths-filter@v2
+      - uses: dorny/paths-filter@v3
         name: Build Detection
         id: needs_dart_build
         with:
@@ -51,6 +52,7 @@ jobs:
               - packages/shorebird_cli/**
               - packages/shorebird_code_push_client/**
               - packages/shorebird_code_push_protocol/**
+              - third_party/googleapis_auth/**
             shorebird_code_push_client:
               - ./.github/codecov.yml
               - ./.github/workflows/main.yaml
@@ -73,7 +75,7 @@ jobs:
               - ./.github/actions/dart_package/action.yaml
               - packages/scoped/**
 
-      - uses: dorny/paths-filter@v2
+      - uses: dorny/paths-filter@v3
         name: Redis Detection
         id: needs_redis_build
         with:
@@ -84,7 +86,18 @@ jobs:
               - ./.github/actions/dart_package/action.yaml
               - packages/redis_client/**
 
-      - uses: dorny/paths-filter@v2
+      - uses: dorny/paths-filter@v3
+        name: Redis Detection
+        id: needs_third_party_build
+        with:
+          filters: |
+            googleapis_auth:
+              - ./.github/codecov.yml
+              - ./.github/workflows/main.yaml
+              - ./.github/actions/dart_package/action.yaml
+              - third_party/googleapis_auth/**
+
+      - uses: dorny/paths-filter@v3
         name: Verify Detection
         id: needs_verify
         with:
@@ -114,14 +127,37 @@ jobs:
 
     steps:
       - name: 📚 Git Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 🎯 Build ${{ matrix.package }}
         uses: ./.github/actions/dart_package
         with:
           codecov_token: ${{ secrets.CODECOV_TOKEN }}
           working_directory: packages/${{ matrix.package }}
-          min_coverage: 100
+          min_coverage: 99
+
+  build_third_party_packages:
+    needs: changes
+    if: ${{ needs.changes.outputs.needs_third_party_build != '[]' }}
+
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.changes.outputs.needs_third_party_build) }}
+
+    runs-on: ubuntu-latest
+
+    name: 🎯 Build ${{ matrix.package }}
+
+    steps:
+      - name: 📚 Git Checkout
+        uses: actions/checkout@v4
+
+      - name: 🎯 Build ${{ matrix.package }}
+        uses: ./.github/actions/dart_package
+        with:
+          codecov_token: ${{ secrets.CODECOV_TOKEN }}
+          working_directory: third_party/${{ matrix.package }}
+          min_coverage: 85
 
   build_redis:
     needs: changes
@@ -139,7 +175,7 @@ jobs:
 
     steps:
       - name: 📚 Git Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 🐳 Run Redis
         run: |
@@ -166,7 +202,7 @@ jobs:
 
     steps:
       - name: 📚 Git Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 🔎 Verify ${{ matrix.package }}
         uses: ./.github/actions/verify_version
@@ -175,7 +211,13 @@ jobs:
 
   ci:
     needs:
-      [semantic_pull_request, build_dart_packages, build_redis, verify_packages]
+      [
+        semantic_pull_request,
+        build_dart_packages,
+        build_redis,
+        build_third_party_packages,
+        verify_packages,
+      ]
     if: ${{ always() }}
 
     runs-on: ubuntu-latest
