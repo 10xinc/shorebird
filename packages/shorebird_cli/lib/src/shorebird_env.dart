@@ -22,6 +22,11 @@ class ShorebirdEnv {
   const ShorebirdEnv({String? flutterRevisionOverride})
       : _flutterRevisionOverride = flutterRevisionOverride;
 
+  ShorebirdEnv copyWith({String? flutterRevisionOverride}) => ShorebirdEnv(
+        flutterRevisionOverride:
+            flutterRevisionOverride ?? _flutterRevisionOverride,
+      );
+
   final String? _flutterRevisionOverride;
 
   /// The root directory of the Shorebird install.
@@ -153,11 +158,6 @@ class ShorebirdEnv {
     } catch (_) {
       return null;
     }
-  }
-
-  /// Whether `shorebird init` has been run in the current project.
-  bool get isShorebirdInitialized {
-    return hasShorebirdYaml && pubspecContainsShorebirdYaml;
   }
 
   /// Whether the current project has a `shorebird.yaml` file.

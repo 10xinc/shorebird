@@ -193,6 +193,7 @@ flutter:
     setUpAll(() {
       registerFallbackValue(Directory(''));
       registerFallbackValue(File(''));
+      registerFallbackValue(FileSetDiff.empty());
       registerFallbackValue(ReleasePlatform.ios);
       registerFallbackValue(Uri.parse('https://example.com'));
       registerFallbackValue(DeploymentTrack.production);
@@ -326,12 +327,27 @@ flutter:
         ),
       ).thenReturn(analyzeSnapshotFile.path);
       when(
+        () => shorebirdFlutter.installRevision(
+          revision: any(named: 'revision'),
+        ),
+      ).thenAnswer((_) async {});
+      when(
         () => shorebirdArtifacts.getArtifactPath(
           artifact: ShorebirdArtifact.genSnapshot,
         ),
       ).thenReturn(genSnapshotFile.path);
       when(() => shorebirdEnv.flutterRevision)
           .thenReturn(preLinkerFlutterRevision);
+      when(
+        () => shorebirdEnv.copyWith(
+          flutterRevisionOverride: any(named: 'flutterRevisionOverride'),
+        ),
+      ).thenAnswer((invocation) {
+        when(() => shorebirdEnv.flutterRevision).thenReturn(
+          invocation.namedArguments[#flutterRevisionOverride] as String,
+        );
+        return shorebirdEnv;
+      });
       when(() => shorebirdEnv.isRunningOnCI).thenReturn(false);
       when(
         () => aotBuildProcessResult.exitCode,
@@ -359,18 +375,14 @@ flutter:
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
           track: any(named: 'track'),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
         ),
       ).thenAnswer((_) async {});
-      when(
-        () => shorebirdFlutter.installRevision(
-          revision: any(named: 'revision'),
-        ),
-      ).thenAnswer((_) async {});
-      when(() => shorebirdFlutter.useRevision(revision: any(named: 'revision')))
-          .thenAnswer((_) async {});
       when(
         () => shorebirdValidator.validatePreconditions(
           checkUserIsAuthenticated: any(named: 'checkUserIsAuthenticated'),
@@ -386,7 +398,12 @@ flutter:
           archiveDiffer: archiveDiffer,
           force: any(named: 'force'),
         ),
-      ).thenAnswer((_) async => {});
+      ).thenAnswer(
+        (_) async => DiffStatus(
+          hasAssetChanges: false,
+          hasNativeChanges: false,
+        ),
+      );
 
       command = runWithOverrides(
         () => PatchIosFrameworkCommand(archiveDiffer: archiveDiffer),
@@ -559,23 +576,51 @@ Please re-run the release command for this version or create a new release.'''),
     });
 
     test(
-        'installs correct flutter revision '
-        'when release flutter revision differs', () async {
+        '''uses release flutter revision if different than default flutter revision''',
+        () async {
       const otherRevision = 'other-revision';
       when(() => shorebirdEnv.flutterRevision).thenReturn(otherRevision);
+      when(
+        () => aotTools.link(
+          base: any(named: 'base'),
+          patch: any(named: 'patch'),
+          analyzeSnapshot: any(named: 'analyzeSnapshot'),
+          workingDirectory: any(named: 'workingDirectory'),
+          outputPath: any(named: 'outputPath'),
+        ),
+      ).thenAnswer((_) async {
+        expect(shorebirdEnv.flutterRevision, equals(preLinkerFlutterRevision));
+      });
+      when(
+        () => shorebirdProcess.run(
+          'flutter',
+          any(),
+          runInShell: any(named: 'runInShell'),
+        ),
+      ).thenAnswer((_) async {
+        expect(shorebirdEnv.flutterRevision, equals(preLinkerFlutterRevision));
+        return flutterBuildProcessResult;
+      });
+      when(
+        () => shorebirdProcess.run(
+          any(that: endsWith('gen_snapshot_arm64')),
+          any(),
+          runInShell: any(named: 'runInShell'),
+        ),
+      ).thenAnswer((_) async {
+        expect(shorebirdEnv.flutterRevision, equals(preLinkerFlutterRevision));
+        return aotBuildProcessResult;
+      });
+
       setUpProjectRoot();
       setUpProjectRootArtifacts();
 
       final exitCode = await runWithOverrides(command.run);
+
       expect(exitCode, equals(ExitCode.success.code));
       verify(
-        () => logger.progress(
-          'Switching to Flutter revision ${preLinkerRelease.flutterRevision}',
-        ),
-      ).called(1);
-      verify(
         () => shorebirdFlutter.installRevision(
-          revision: preLinkerRelease.flutterRevision,
+          revision: preLinkerFlutterRevision,
         ),
       ).called(1);
     });
@@ -600,8 +645,22 @@ Please re-run the release command for this version or create a new release.'''),
           environment: any(named: 'environment'),
         ),
       ).thenAnswer((_) async => flutterBuildProcessResult);
+      final flutterFile = File(
+        p.join(
+          '.',
+          'bin',
+          'cache',
+          'flutter',
+          preLinkerRelease.flutterRevision,
+          'bin',
+          'flutter',
+        ),
+      );
+      when(() => shorebirdEnv.flutterBinaryFile).thenReturn(flutterFile);
+
       setUpProjectRoot();
       setUpProjectRootArtifacts();
+
       await runWithOverrides(
         () => runScoped(
           () => command.run(),
@@ -612,17 +671,15 @@ Please re-run the release command for this version or create a new release.'''),
           },
         ),
       );
+
+      verify(
+        () => shorebirdFlutter.installRevision(
+          revision: preLinkerFlutterRevision,
+        ),
+      ).called(1);
       verify(
         () => processWrapper.run(
-          p.join(
-            '.',
-            'bin',
-            'cache',
-            'flutter',
-            preLinkerRelease.flutterRevision,
-            'bin',
-            'flutter',
-          ),
+          flutterFile.path,
           any(),
           runInShell: true,
           workingDirectory: any(named: 'workingDirectory'),
@@ -631,33 +688,28 @@ Please re-run the release command for this version or create a new release.'''),
       ).called(1);
     });
 
-    test(
-        'exits with code 70 when '
-        'unable to install correct flutter revision', () async {
-      final exception = Exception('oops');
-      const otherRevision = 'other-revision';
-      when(() => shorebirdEnv.flutterRevision).thenReturn(otherRevision);
-      when(
-        () => shorebirdFlutter.installRevision(
-          revision: any(named: 'revision'),
-        ),
-      ).thenThrow(exception);
-      setUpProjectRoot();
-      setUpProjectRootArtifacts();
+    group('when flutter version install fails', () {
+      setUp(() {
+        when(
+          () => shorebirdFlutter.installRevision(
+            revision: any(named: 'revision'),
+          ),
+        ).thenThrow(Exception('oops'));
+      });
 
-      final exitCode = await runWithOverrides(command.run);
-      expect(exitCode, equals(ExitCode.software.code));
-      verify(
-        () => logger.progress(
-          'Switching to Flutter revision ${preLinkerRelease.flutterRevision}',
-        ),
-      ).called(1);
-      verify(
-        () => shorebirdFlutter.installRevision(
-          revision: preLinkerRelease.flutterRevision,
-        ),
-      ).called(1);
-      verify(() => progress.fail('$exception')).called(1);
+      test('exits with code 70', () async {
+        setUpProjectRoot();
+        setUpProjectRootArtifacts();
+
+        final result = await runWithOverrides(command.run);
+
+        expect(result, equals(ExitCode.software.code));
+        verify(
+          () => shorebirdFlutter.installRevision(
+            revision: preLinkerFlutterRevision,
+          ),
+        ).called(1);
+      });
     });
 
     test('aborts when user opts out', () async {
@@ -723,6 +775,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
           track: any(named: 'track'),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -760,6 +815,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
           track: any(named: 'track'),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -777,6 +835,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.createPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
         ),
       );
       verify(() => logger.info('No issues detected.')).called(1);
@@ -793,6 +854,51 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: preLinkerRelease.id,
+          wasForced: true,
+          hasAssetChanges: false,
+          hasNativeChanges: false,
+          platform: ReleasePlatform.ios,
+          track: track,
+          patchArtifactBundles: any(named: 'patchArtifactBundles'),
+        ),
+      ).called(1);
+    });
+
+    test('reports when patch has asset and native changes', () async {
+      when(() => argResults['force']).thenReturn(true);
+      when(() => archiveDiffer.containsPotentiallyBreakingAssetDiffs(any()))
+          .thenReturn(true);
+      when(() => archiveDiffer.containsPotentiallyBreakingNativeDiffs(any()))
+          .thenReturn(true);
+      when(() => archiveDiffer.changedFiles(any(), any()))
+          .thenAnswer((_) async => FileSetDiff.empty());
+      when(
+        () => patchDiffChecker.zipAndConfirmUnpatchableDiffsIfNecessary(
+          localArtifactDirectory: any(named: 'localArtifactDirectory'),
+          releaseArtifact: any(named: 'releaseArtifact'),
+          archiveDiffer: archiveDiffer,
+          force: any(named: 'force'),
+        ),
+      ).thenAnswer(
+        (_) async => DiffStatus(
+          hasAssetChanges: true,
+          hasNativeChanges: true,
+        ),
+      );
+
+      setUpProjectRootArtifacts();
+
+      final exitCode = await runWithOverrides(command.run);
+
+      expect(exitCode, equals(ExitCode.success.code));
+      verifyNever(() => logger.confirm(any()));
+      verify(
+        () => codePushClientWrapper.publishPatch(
+          appId: appId,
+          releaseId: postLinkerRelease.id,
+          wasForced: true,
+          hasAssetChanges: true,
+          hasNativeChanges: true,
           platform: ReleasePlatform.ios,
           track: track,
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -819,6 +925,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: preLinkerRelease.id,
+          wasForced: false,
+          hasAssetChanges: false,
+          hasNativeChanges: false,
           platform: ReleasePlatform.ios,
           track: track,
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -1021,6 +1130,9 @@ Please re-run the release command for this version or create a new release.'''),
           () => codePushClientWrapper.publishPatch(
             appId: appId,
             releaseId: preLinkerRelease.id,
+            wasForced: false,
+            hasAssetChanges: false,
+            hasNativeChanges: false,
             platform: ReleasePlatform.ios,
             track: track,
             patchArtifactBundles: any(

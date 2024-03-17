@@ -220,10 +220,23 @@ flutter:
       when(
         () => shorebirdEnv.getShorebirdProjectRoot(),
       ).thenReturn(projectRoot);
+      when(
+        () => shorebirdEnv.copyWith(
+          flutterRevisionOverride: any(named: 'flutterRevisionOverride'),
+        ),
+      ).thenAnswer((invocation) {
+        when(() => shorebirdEnv.flutterRevision).thenReturn(
+          invocation.namedArguments[#flutterRevisionOverride] as String,
+        );
+        return shorebirdEnv;
+      });
       when(() => shorebirdEnv.flutterDirectory).thenReturn(flutterDirectory);
       when(() => shorebirdEnv.flutterRevision).thenReturn(flutterRevision);
-      when(() => shorebirdFlutter.useRevision(revision: any(named: 'revision')))
-          .thenAnswer((_) async {});
+      when(
+        () => shorebirdFlutter.installRevision(
+          revision: any(named: 'revision'),
+        ),
+      ).thenAnswer((_) async {});
       when(
         () => shorebirdProcess.run(
           'flutter',
@@ -329,6 +342,9 @@ flutter:
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
           track: any(named: 'track'),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -361,7 +377,12 @@ flutter:
           archiveDiffer: archiveDiffer,
           force: any(named: 'force'),
         ),
-      ).thenAnswer((_) async => {});
+      ).thenAnswer(
+        (_) async => DiffStatus(
+          hasAssetChanges: false,
+          hasNativeChanges: false,
+        ),
+      );
       when(() => shorebirdEnv.isRunningOnCI).thenReturn(false);
     });
 
@@ -479,11 +500,6 @@ Please re-run the release command for this version or create a new release.'''),
       final exitCode = await runWithOverrides(command.run);
 
       expect(exitCode, ExitCode.success.code);
-      // Verify that we switch back to the original revision once we're done.
-      verifyInOrder([
-        () => shorebirdFlutter.useRevision(revision: release.flutterRevision),
-        () => shorebirdFlutter.useRevision(revision: otherRevision),
-      ]);
       verify(
         () => logger.info(
           any(
@@ -497,27 +513,6 @@ Please re-run the release command for this version or create a new release.'''),
       ).called(1);
     });
 
-    test(
-      'exits with code 70 if build fails after switching flutter versions',
-      () async {
-        const otherRevision = 'other-revision';
-        when(() => shorebirdEnv.flutterRevision).thenReturn(otherRevision);
-        when(
-          () => shorebirdFlutter.useRevision(revision: any(named: 'revision')),
-        ).thenAnswer((invocation) async {
-          // Cause builds to fail after switching flutter versions.
-          when(() => flutterBuildProcessResult.exitCode).thenReturn(1);
-          when(() => flutterBuildProcessResult.stderr).thenReturn('oops');
-        });
-        setUpProjectRoot();
-        setUpProjectRootArtifacts();
-
-        final exitCode = await runWithOverrides(command.run);
-
-        expect(exitCode, equals(ExitCode.software.code));
-      },
-    );
-
     group('when release-version option is provided', () {
       setUp(() {
         when(() => argResults['release-version']).thenReturn(release.version);
@@ -530,6 +525,53 @@ Please re-run the release command for this version or create a new release.'''),
         verifyNever(() => bundletool.getVersionName(any()));
         verifyNever(() => bundletool.getVersionCode(any()));
         verifyNever(() => logger.progress('Detecting release version'));
+      });
+
+      test('exits with code 70 if build fails', () async {
+        when(() => flutterBuildProcessResult.exitCode).thenReturn(1);
+        when(() => flutterBuildProcessResult.stderr).thenReturn('oops');
+
+        setUpProjectRoot();
+        setUpProjectRootArtifacts();
+        final exitCode = await runWithOverrides(command.run);
+        expect(exitCode, ExitCode.software.code);
+      });
+
+      test('only builds once if release uses different flutter revision',
+          () async {
+        const otherRevision = 'other-revision';
+        when(() => shorebirdEnv.flutterRevision).thenReturn(otherRevision);
+        when(
+          () => shorebirdProcess.run(
+            'flutter',
+            any(),
+            runInShell: any(named: 'runInShell'),
+          ),
+        ).thenAnswer((_) async {
+          // Ensure we're building with the correct flutter revision.
+          expect(shorebirdEnv.flutterRevision, equals(release.flutterRevision));
+          return flutterBuildProcessResult;
+        });
+
+        setUpProjectRoot();
+        setUpProjectRootArtifacts();
+        final exitCode = await runWithOverrides(command.run);
+        expect(exitCode, ExitCode.success.code);
+        verify(
+          () => shorebirdEnv.copyWith(flutterRevisionOverride: flutterRevision),
+        ).called(1);
+
+        verify(
+          () => shorebirdProcess.run(
+            'flutter',
+            [
+              'build',
+              'appbundle',
+              '--release',
+            ],
+            runInShell: any(named: 'runInShell'),
+          ),
+        ).called(1);
       });
     });
 
@@ -639,6 +681,30 @@ Please re-run the release command for this version or create a new release.'''),
       ).called(1);
     });
 
+    group('when flutter version install fails', () {
+      setUp(() {
+        when(
+          () => shorebirdFlutter.installRevision(
+            revision: any(named: 'revision'),
+          ),
+        ).thenThrow(Exception('oops'));
+      });
+
+      test('exits with code 70', () async {
+        setUpProjectRoot();
+        setUpProjectRootArtifacts();
+
+        final result = await runWithOverrides(command.run);
+
+        expect(result, equals(ExitCode.software.code));
+        verify(
+          () => shorebirdFlutter.installRevision(
+            revision: release.flutterRevision,
+          ),
+        ).called(1);
+      });
+    });
+
     test(
         '''exits with code 0 if confirmUnpatchableDiffsIfNecessary throws UserCancelledException''',
         () async {
@@ -669,6 +735,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
           track: any(named: 'track'),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -707,6 +776,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
           track: any(named: 'track'),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -740,6 +812,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
           track: any(named: 'track'),
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -763,6 +838,51 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: release.id,
+          wasForced: any(named: 'wasForced'),
+          hasAssetChanges: any(named: 'hasAssetChanges'),
+          hasNativeChanges: any(named: 'hasNativeChanges'),
+          platform: releasePlatform,
+          track: track,
+          patchArtifactBundles: any(named: 'patchArtifactBundles'),
+        ),
+      ).called(1);
+    });
+
+    test('reports when patch has asset and native changes', () async {
+      when(() => argResults['force']).thenReturn(true);
+      when(() => archiveDiffer.containsPotentiallyBreakingAssetDiffs(any()))
+          .thenReturn(true);
+      when(() => archiveDiffer.containsPotentiallyBreakingNativeDiffs(any()))
+          .thenReturn(true);
+      when(() => archiveDiffer.changedFiles(any(), any()))
+          .thenAnswer((_) async => FileSetDiff.empty());
+      when(
+        () => patchDiffChecker.confirmUnpatchableDiffsIfNecessary(
+          localArtifact: any(named: 'localArtifact'),
+          releaseArtifact: any(named: 'releaseArtifact'),
+          archiveDiffer: archiveDiffer,
+          force: any(named: 'force'),
+        ),
+      ).thenAnswer(
+        (_) async => DiffStatus(
+          hasAssetChanges: true,
+          hasNativeChanges: true,
+        ),
+      );
+
+      setUpProjectRootArtifacts();
+
+      final exitCode = await runWithOverrides(command.run);
+
+      expect(exitCode, equals(ExitCode.success.code));
+      verifyNever(() => logger.confirm(any()));
+      verify(
+        () => codePushClientWrapper.publishPatch(
+          appId: appId,
+          releaseId: release.id,
+          wasForced: true,
+          hasAssetChanges: true,
+          hasNativeChanges: true,
           platform: releasePlatform,
           track: track,
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -771,9 +891,27 @@ Please re-run the release command for this version or create a new release.'''),
     });
 
     test('succeeds when patch is successful (production)', () async {
+      when(
+        () => shorebirdProcess.run(
+          'flutter',
+          any(),
+          runInShell: any(named: 'runInShell'),
+        ),
+      ).thenAnswer((_) async {
+        // Ensure we're building with the correct flutter revision.
+        expect(shorebirdEnv.flutterRevision, equals(release.flutterRevision));
+        return flutterBuildProcessResult;
+      });
       setUpProjectRoot();
       setUpProjectRootArtifacts();
+
       final exitCode = await runWithOverrides(command.run);
+
+      verify(
+        () => shorebirdFlutter.installRevision(
+          revision: release.flutterRevision,
+        ),
+      ).called(1);
       verify(
         () => logger.info(
           any(
@@ -789,6 +927,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: release.id,
+          wasForced: false,
+          hasAssetChanges: false,
+          hasNativeChanges: false,
           platform: releasePlatform,
           track: track,
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -817,6 +958,9 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: release.id,
+          wasForced: false,
+          hasAssetChanges: false,
+          hasNativeChanges: false,
           platform: releasePlatform,
           track: DeploymentTrack.staging,
           patchArtifactBundles: any(named: 'patchArtifactBundles'),
@@ -841,13 +985,22 @@ Please re-run the release command for this version or create a new release.'''),
       ).called(1);
     });
 
-    test(
-        'succeeds when patch is successful '
-        'with flavors and target', () async {
+    test('succeeds when patch is successful with flavors and target', () async {
       const flavor = 'development';
       const target = './lib/main_development.dart';
       when(() => argResults['flavor']).thenReturn(flavor);
       when(() => argResults['target']).thenReturn(target);
+      when(
+        () => shorebirdProcess.run(
+          'flutter',
+          any(),
+          runInShell: any(named: 'runInShell'),
+        ),
+      ).thenAnswer((_) async {
+        // Ensure we're building with the correct flutter revision.
+        expect(shorebirdEnv.flutterRevision, equals(release.flutterRevision));
+        return flutterBuildProcessResult;
+      });
       setUpProjectRoot();
       File(
         p.join(projectRoot.path, 'shorebird.yaml'),
@@ -861,6 +1014,9 @@ flavors:
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: release.id,
+          wasForced: false,
+          hasAssetChanges: false,
+          hasNativeChanges: false,
           platform: releasePlatform,
           track: track,
           patchArtifactBundles: any(named: 'patchArtifactBundles'),

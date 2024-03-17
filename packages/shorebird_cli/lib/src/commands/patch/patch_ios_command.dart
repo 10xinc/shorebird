@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:io' hide Platform;
-import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 import 'package:mason_logger/mason_logger.dart';
 import 'package:path/path.dart' as p;
 import 'package:platform/platform.dart';
+import 'package:scoped/scoped.dart';
 import 'package:shorebird_cli/src/archive_analysis/archive_analysis.dart';
 import 'package:shorebird_cli/src/artifact_manager.dart';
 import 'package:shorebird_cli/src/code_push_client_wrapper.dart';
@@ -121,30 +121,11 @@ If this option is not provided, the version number will be determined from the p
     const releasePlatform = ReleasePlatform.ios;
     final flavor = results.findOption('flavor', argParser: argParser);
     final target = results.findOption('target', argParser: argParser);
-
     final shorebirdYaml = shorebirdEnv.getShorebirdYaml()!;
     final appId = shorebirdYaml.getAppId(flavor: flavor);
     final app = await codePushClientWrapper.getApp(appId: appId);
+    var hasBuiltWithActiveFlutter = false;
 
-    try {
-      await _buildPatch(flavor: flavor, target: target);
-    } catch (_) {
-      return ExitCode.software.code;
-    }
-
-    final archivePath = getXcarchiveDirectory()?.path;
-    if (archivePath == null) {
-      logger.err('Unable to find .xcarchive directory');
-      return ExitCode.software.code;
-    }
-
-    final plistFile = File(p.join(archivePath, 'Info.plist'));
-    if (!plistFile.existsSync()) {
-      logger.err('No Info.plist file found at ${plistFile.path}.');
-      return ExitCode.software.code;
-    }
-
-    final plist = Plist(file: plistFile);
     final String releaseVersion;
     final argReleaseVersion = results['release-version'] as String?;
     if (argReleaseVersion != null) {
@@ -153,15 +134,19 @@ If this option is not provided, the version number will be determined from the p
     } else {
       logger.detail('No release version provided. Determining from archive.');
       try {
-        releaseVersion = plist.versionNumber;
-      } catch (error) {
-        logger.err(
-          'Failed to determine release version from ${plistFile.path}: $error',
-        );
+        await _buildPatch(flavor: flavor, target: target);
+      } catch (_) {
         return ExitCode.software.code;
       }
+      hasBuiltWithActiveFlutter = true;
 
-      logger.info('Detected release version $releaseVersion');
+      try {
+        releaseVersion = _readVersionFromPlist();
+        logger.info('Detected release version $releaseVersion');
+      } on _ReadVersionException catch (error) {
+        logger.err(error.message);
+        return ExitCode.software.code;
+      }
     }
 
     final release = await codePushClientWrapper.getRelease(
@@ -182,206 +167,218 @@ Please re-run the release command for this version or create a new release.''');
 
     final currentFlutterRevision = shorebirdEnv.flutterRevision;
     if (release.flutterRevision != currentFlutterRevision) {
-      logger.info('''
+      logger.info(
+        '''
 
 The release you are trying to patch was built with a different version of Flutter.
 
 Release Flutter Revision: ${release.flutterRevision}
 Current Flutter Revision: $currentFlutterRevision
-''');
-
-      var flutterVersionProgress = logger.progress(
-        'Switching to Flutter revision ${release.flutterRevision}',
+''',
       );
-      await shorebirdFlutter.useRevision(revision: release.flutterRevision);
-      flutterVersionProgress.complete();
-
-      try {
-        await _buildPatch(flavor: flavor, target: target);
-      } catch (_) {
-        return ExitCode.software.code;
-      } finally {
-        flutterVersionProgress = logger.progress(
-          '''Switching back to original Flutter revision $currentFlutterRevision''',
-        );
-        await shorebirdFlutter.useRevision(revision: currentFlutterRevision);
-        flutterVersionProgress.complete();
-      }
     }
-
-    final releaseArtifact = await codePushClientWrapper.getReleaseArtifact(
-      appId: appId,
-      releaseId: release.id,
-      arch: 'xcarchive',
-      platform: ReleasePlatform.ios,
-    );
-
-    final downloadProgress = logger.progress('Downloading release artifact');
-    final File releaseArtifactZipFile;
-    try {
-      releaseArtifactZipFile = await artifactManager.downloadFile(
-        Uri.parse(releaseArtifact.url),
-      );
-      if (!releaseArtifactZipFile.existsSync()) {
-        throw Exception('Failed to download release artifact');
-      }
-    } catch (error) {
-      downloadProgress.fail('$error');
-      return ExitCode.software.code;
-    }
-    downloadProgress.complete();
 
     try {
-      await patchDiffChecker.zipAndConfirmUnpatchableDiffsIfNecessary(
-        localArtifactDirectory: Directory(archivePath),
-        releaseArtifact: releaseArtifactZipFile,
-        archiveDiffer: _archiveDiffer,
-        force: force,
-      );
-    } on UserCancelledException {
-      return ExitCode.success.code;
-    } on UnpatchableChangeException {
-      logger.info('Exiting.');
+      await shorebirdFlutter.installRevision(revision: release.flutterRevision);
+    } catch (_) {
       return ExitCode.software.code;
     }
 
-    final extractZip = artifactManager.extractZip;
-    final unzipProgress = logger.progress('Extracting release artifact');
-    final releaseXcarchivePath = await Isolate.run(() async {
-      final tempDir = Directory.systemTemp.createTempSync();
-      await extractZip(
-        zipFile: releaseArtifactZipFile,
-        outputDirectory: tempDir,
-      );
-      return tempDir.path;
-    });
-    unzipProgress.complete();
-    final appDirectory =
-        getAppDirectory(xcarchiveDirectory: Directory(releaseXcarchivePath));
-    if (appDirectory == null) {
-      logger.err('Unable to find release artifact .app directory');
-      return ExitCode.software.code;
-    }
-    final releaseArtifactFile = File(
-      p.join(
-        appDirectory.path,
-        'Frameworks',
-        'App.framework',
-        'App',
-      ),
+    final releaseFlutterShorebirdEnv = shorebirdEnv.copyWith(
+      flutterRevisionOverride: release.flutterRevision,
     );
 
-    final useLinker = engineConfig.localEngine != null ||
-        !preLinkerFlutterRevisions.contains(release.flutterRevision);
-    if (useLinker) {
-      // Because aot-tools is versioned with the engine, we need to use the
-      // original Flutter revision to link the patch. We have already switched
-      // to and from the release's Flutter revision before and could
-      // theoretically have just stayed on that revision until after _runLinker,
-      // but this approach makes it less likely that we will leave the user on
-      // a different version of Flutter than they started with if something
-      // goes wrong.
-      if (release.flutterRevision != currentFlutterRevision) {
-        await shorebirdFlutter.useRevision(revision: release.flutterRevision);
-      }
-      final exitCode = await _runLinker(
-        releaseArtifact: releaseArtifactFile,
-      );
-      if (release.flutterRevision != currentFlutterRevision) {
-        await shorebirdFlutter.useRevision(revision: currentFlutterRevision);
-      }
-      if (exitCode != ExitCode.success.code) {
-        return exitCode;
-      }
-    }
+    return await runScoped(
+      () async {
+        if (!hasBuiltWithActiveFlutter ||
+            release.flutterRevision != currentFlutterRevision) {
+          try {
+            await _buildPatch(flavor: flavor, target: target);
+          } catch (_) {
+            return ExitCode.software.code;
+          }
+        }
 
-    if (dryRun) {
-      logger
-        ..info('No issues detected.')
-        ..info('The server may enforce additional checks.');
-      return ExitCode.success.code;
-    }
+        final archivePath = getXcarchiveDirectory()?.path;
+        if (archivePath == null) {
+          logger.err('Unable to find .xcarchive directory');
+          return ExitCode.software.code;
+        }
 
-    final patchBuildFile = File(useLinker ? _vmcodeOutputPath : _aotOutputPath);
-    final File patchFile;
-    if (useLinker && await aotTools.isGeneratePatchDiffBaseSupported()) {
-      final patchBaseProgress = logger.progress('Generating patch diff base');
-      final analyzeSnapshotPath = shorebirdArtifacts.getArtifactPath(
-        artifact: ShorebirdArtifact.analyzeSnapshot,
-      );
-
-      final File patchBaseFile;
-      try {
-        // If the aot_tools executable supports the dump_blobs command, we
-        // can generate a stable diff base and use that to create a patch.
-        patchBaseFile = await aotTools.generatePatchDiffBase(
-          analyzeSnapshotPath: analyzeSnapshotPath,
-          releaseSnapshot: releaseArtifactFile,
+        final releaseArtifact = await codePushClientWrapper.getReleaseArtifact(
+          appId: appId,
+          releaseId: release.id,
+          arch: 'xcarchive',
+          platform: ReleasePlatform.ios,
         );
-        patchBaseProgress.complete();
-      } catch (error) {
-        patchBaseProgress.fail('$error');
-        return ExitCode.software.code;
-      }
 
-      patchFile = File(
-        await artifactManager.createDiff(
-          releaseArtifactPath: patchBaseFile.path,
-          patchArtifactPath: patchBuildFile.path,
-        ),
-      );
-    } else {
-      patchFile = patchBuildFile;
-    }
+        final downloadProgress =
+            logger.progress('Downloading release artifact');
+        final File releaseArtifactZipFile;
+        try {
+          releaseArtifactZipFile = await artifactManager.downloadFile(
+            Uri.parse(releaseArtifact.url),
+          );
+          if (!releaseArtifactZipFile.existsSync()) {
+            throw Exception('Failed to download release artifact');
+          }
+        } catch (error) {
+          downloadProgress.fail('$error');
+          return ExitCode.software.code;
+        }
+        downloadProgress.complete();
 
-    final patchFileSize = patchFile.statSync().size;
+        final DiffStatus diffStatus;
+        try {
+          diffStatus =
+              await patchDiffChecker.zipAndConfirmUnpatchableDiffsIfNecessary(
+            localArtifactDirectory: Directory(archivePath),
+            releaseArtifact: releaseArtifactZipFile,
+            archiveDiffer: _archiveDiffer,
+            force: force,
+          );
+        } on UserCancelledException {
+          return ExitCode.success.code;
+        } on UnpatchableChangeException {
+          logger.info('Exiting.');
+          return ExitCode.software.code;
+        }
 
-    final summary = [
-      '''📱 App: ${lightCyan.wrap(app.displayName)} ${lightCyan.wrap('($appId)')}''',
-      if (flavor != null) '🍧 Flavor: ${lightCyan.wrap(flavor)}',
-      '📦 Release Version: ${lightCyan.wrap(releaseVersion)}',
-      '''🕹️  Platform: ${lightCyan.wrap(releasePlatform.name)} ${lightCyan.wrap('[$arch (${formatBytes(patchFileSize)})]')}''',
-      if (isStaging)
-        '🟠 Track: ${lightCyan.wrap('Staging')}'
-      else
-        '🟢 Track: ${lightCyan.wrap('Production')}',
-    ];
+        final unzipProgress = logger.progress('Extracting release artifact');
+        final tempDir = Directory.systemTemp.createTempSync();
+        await artifactManager.extractZip(
+          zipFile: releaseArtifactZipFile,
+          outputDirectory: tempDir,
+        );
+        final releaseXcarchivePath = tempDir.path;
 
-    logger.info(
-      '''
+        unzipProgress.complete();
+        final appDirectory = getAppDirectory(
+          xcarchiveDirectory: Directory(releaseXcarchivePath),
+        );
+        if (appDirectory == null) {
+          logger.err('Unable to find release artifact .app directory');
+          return ExitCode.software.code;
+        }
+        final releaseArtifactFile = File(
+          p.join(
+            appDirectory.path,
+            'Frameworks',
+            'App.framework',
+            'App',
+          ),
+        );
+
+        final useLinker = engineConfig.localEngine != null ||
+            !preLinkerFlutterRevisions.contains(release.flutterRevision);
+        if (useLinker) {
+          final exitCode = await _runLinker(
+            releaseArtifact: releaseArtifactFile,
+          );
+
+          if (exitCode != ExitCode.success.code) {
+            return exitCode;
+          }
+        }
+
+        if (dryRun) {
+          logger
+            ..info('No issues detected.')
+            ..info('The server may enforce additional checks.');
+          return ExitCode.success.code;
+        }
+
+        final patchBuildFile =
+            File(useLinker ? _vmcodeOutputPath : _aotOutputPath);
+        final File patchFile;
+        if (useLinker && await aotTools.isGeneratePatchDiffBaseSupported()) {
+          final patchBaseProgress =
+              logger.progress('Generating patch diff base');
+          final analyzeSnapshotPath = shorebirdArtifacts.getArtifactPath(
+            artifact: ShorebirdArtifact.analyzeSnapshot,
+          );
+
+          final File patchBaseFile;
+          try {
+            // If the aot_tools executable supports the dump_blobs command, we
+            // can generate a stable diff base and use that to create a patch.
+            patchBaseFile = await aotTools.generatePatchDiffBase(
+              analyzeSnapshotPath: analyzeSnapshotPath,
+              releaseSnapshot: releaseArtifactFile,
+            );
+            patchBaseProgress.complete();
+          } catch (error) {
+            patchBaseProgress.fail('$error');
+            return ExitCode.software.code;
+          }
+
+          patchFile = File(
+            await artifactManager.createDiff(
+              releaseArtifactPath: patchBaseFile.path,
+              patchArtifactPath: patchBuildFile.path,
+            ),
+          );
+        } else {
+          patchFile = patchBuildFile;
+        }
+
+        final patchFileSize = patchFile.statSync().size;
+
+        final summary = [
+          '''📱 App: ${lightCyan.wrap(app.displayName)} ${lightCyan.wrap('($appId)')}''',
+          if (flavor != null) '🍧 Flavor: ${lightCyan.wrap(flavor)}',
+          '📦 Release Version: ${lightCyan.wrap(releaseVersion)}',
+          '''🕹️  Platform: ${lightCyan.wrap(releasePlatform.name)} ${lightCyan.wrap('[$arch (${formatBytes(patchFileSize)})]')}''',
+          if (isStaging)
+            '🟠 Track: ${lightCyan.wrap('Staging')}'
+          else
+            '🟢 Track: ${lightCyan.wrap('Production')}',
+        ];
+
+        logger.info(
+          '''
 
 ${styleBold.wrap(lightGreen.wrap('🚀 Ready to publish a new patch!'))}
 
 ${summary.join('\n')}
 ''',
-    );
+        );
 
-    final needsConfirmation = !force && !shorebirdEnv.isRunningOnCI;
-    if (needsConfirmation) {
-      final confirm = logger.confirm('Would you like to continue?');
+        final needsConfirmation = !force && !shorebirdEnv.isRunningOnCI;
+        if (needsConfirmation) {
+          final confirm = logger.confirm('Would you like to continue?');
 
-      if (!confirm) {
-        logger.info('Aborting.');
+          if (!confirm) {
+            logger.info('Aborting.');
+            return ExitCode.success.code;
+          }
+        }
+
+        await codePushClientWrapper.publishPatch(
+          appId: appId,
+          releaseId: release.id,
+          wasForced: force,
+          hasAssetChanges: diffStatus.hasAssetChanges,
+          hasNativeChanges: diffStatus.hasNativeChanges,
+          platform: releasePlatform,
+          track:
+              isStaging ? DeploymentTrack.staging : DeploymentTrack.production,
+          patchArtifactBundles: {
+            Arch.arm64: PatchArtifactBundle(
+              arch: arch,
+              path: patchFile.path,
+              hash: _hashFn(patchBuildFile.readAsBytesSync()),
+              size: patchFileSize,
+            ),
+          },
+        );
+
         return ExitCode.success.code;
-      }
-    }
-
-    await codePushClientWrapper.publishPatch(
-      appId: appId,
-      releaseId: release.id,
-      platform: releasePlatform,
-      track: isStaging ? DeploymentTrack.staging : DeploymentTrack.production,
-      patchArtifactBundles: {
-        Arch.arm64: PatchArtifactBundle(
-          arch: arch,
-          path: patchFile.path,
-          hash: _hashFn(patchBuildFile.readAsBytesSync()),
-          size: patchFileSize,
-        ),
+      },
+      values: {
+        shorebirdEnvRef.overrideWith(() => releaseFlutterShorebirdEnv),
       },
     );
-
-    return ExitCode.success.code;
   }
 
   String get _buildDirectory => p.join(
@@ -399,6 +396,29 @@ ${summary.join('\n')}
         'out.vmcode',
       );
 
+  String _readVersionFromPlist() {
+    final archivePath = getXcarchiveDirectory()?.path;
+    if (archivePath == null) {
+      throw _ReadVersionException('Unable to find .xcarchive directory');
+    }
+
+    final plistFile = File(p.join(archivePath, 'Info.plist'));
+    if (!plistFile.existsSync()) {
+      throw _ReadVersionException(
+        'No Info.plist file found at ${plistFile.path}.',
+      );
+    }
+
+    final plist = Plist(file: plistFile);
+    try {
+      return plist.versionNumber;
+    } catch (error) {
+      throw _ReadVersionException(
+        'Failed to determine release version from ${plistFile.path}: $error',
+      );
+    }
+  }
+
   Future<void> _buildPatch({
     required String? flavor,
     required String? target,
@@ -408,7 +428,11 @@ ${summary.join('\n')}
     try {
       // If buildIpa is called with a different codesign value than the release
       // was, we will erroneously report native diffs.
-      await buildIpa(codesign: shouldCodesign, flavor: flavor, target: target);
+      await buildIpa(
+        codesign: shouldCodesign,
+        flavor: flavor,
+        target: target,
+      );
     } on ProcessException catch (error) {
       buildProgress.fail('Failed to build: ${error.message}');
       rethrow;
@@ -468,4 +492,14 @@ ${summary.join('\n')}
     linkProgress.complete();
     return ExitCode.success.code;
   }
+}
+
+/// {@template _ReadVersionException}
+/// Exception thrown when the release version cannot be determined.
+/// {@endtemplate}
+class _ReadVersionException implements Exception {
+  /// {@macro _ReadVersionException}
+  _ReadVersionException(this.message);
+
+  final String message;
 }

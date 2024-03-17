@@ -2,11 +2,53 @@
 
 This section contains past updates we've sent to customers via Discord.
 
-## 0.26.1 (February 26, 2024)
+## 0.26.6 (March 14, 2024)
 
-🆕 Updated to Flutter 3.19.1.
+📝 Update iOS hybrid app workflow to use signed xcframeworks to comply with
+Apple's privacy requirements. Note: this changes the workflow for iOS hybrid
+apps that use Shorebird. If you have an iOS hybrid app, please see the updated
+documentation at https://docs.shorebird.dev/guides/hybrid-app/ios.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.26.6
+
+## 0.26.5 (March 13, 2024)
+
+🩹 Fix issue where releases created with `--flutter-version` flag were reporting
+   incorrect Flutter version, causing `shorebird patch` to later fail. If you've
+   created a release using `--flutter-version`, you may not be able to patch.
+   To resolve this, create a new release after upgrading to this version.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.26.5
+
+## 0.26.4 (March 11, 2024)
+
+🪵 Clearer error messages for cases where shorebird is not properly set up in a project.
+🍎 Fix incorrect native code change warning for iOS patches created in different
+   directory or machine than release.
+🩹 Fix issue where patch commands would unnecessarily recompile the app when a
+   release version is specified.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.26.4
+
+## 0.26.3 (March 5, 2024)
+
+🧑‍🔬 Record more diagnostic information to help solve problems with patches.
+🪵 Improved messaging for expiring CI tokens.
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.26.3
+
+## 0.26.2 (February 29, 2024)
+
+⬇️ Lower required Dart version to 3.0
+
+📚 Release notes can be found at https://github.com/shorebirdtech/shorebird/releases/tag/v0.26.2
+
+## 0.26.1 (February 28, 2024)
+
+🆕 Updated to Flutter 3.19.2.
 🪟 Fixed `shorebird patch` failing on some Windows installs (missing .dll).
-☁️ Added Microsoft login to `shorebird login` and console.shorebird.dev.
+☁️ Added Microsoft login to `shorebird login`, `shorebird login:ci`, and
+  console.shorebird.dev.
 
 Microsoft login will show Shorebird as an "unverified" app for a few more
 days until our Microsoft Partner Program application completes.

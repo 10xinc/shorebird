@@ -37,19 +37,19 @@ const microsoftJwtIssuerPrefix = 'https://login.microsoftonline.com/';
 const shorebirdTokenEnvVar = 'SHOREBIRD_TOKEN';
 
 typedef ObtainAccessCredentials = Future<oauth2.AccessCredentials> Function(
-  oauth2.AuthEndpoints authEndpoints,
   oauth2.ClientId clientId,
   List<String> scopes,
   http.Client client,
-  void Function(String) userPrompt,
-);
+  void Function(String) userPrompt, {
+  oauth2.AuthEndpoints authEndpoints,
+});
 
 typedef RefreshCredentials = Future<oauth2.AccessCredentials> Function(
-  oauth2.AuthEndpoints authEndpoints,
   oauth2.ClientId clientId,
   oauth2.AccessCredentials credentials,
-  http.Client client,
-);
+  http.Client client, {
+  oauth2.AuthEndpoints authEndpoints,
+});
 
 typedef OnRefreshCredentials = void Function(
   oauth2.AccessCredentials credentials,
@@ -105,7 +105,6 @@ class AuthenticatedClient extends http.BaseClient {
     if (credentials == null) {
       final token = _token!;
       credentials = _credentials = await _refreshCredentials(
-        token.authProvider.authEndpoints,
         token.authProvider.clientId,
         oauth2.AccessCredentials(
           // This isn't relevant for a refresh operation.
@@ -114,6 +113,7 @@ class AuthenticatedClient extends http.BaseClient {
           token.authProvider.scopes,
         ),
         _baseClient,
+        authEndpoints: token.authProvider.authEndpoints,
       );
       _onRefreshCredentials?.call(credentials);
     }
@@ -123,10 +123,10 @@ class AuthenticatedClient extends http.BaseClient {
       final authProvider = jwt.authProvider;
 
       credentials = _credentials = await _refreshCredentials(
-        authProvider.authEndpoints,
         authProvider.clientId,
         credentials,
         _baseClient,
+        authEndpoints: authProvider.authEndpoints,
       );
       _onRefreshCredentials?.call(credentials);
     }
@@ -190,11 +190,11 @@ class Auth {
     final client = http.Client();
     try {
       final credentials = await _obtainAccessCredentials(
-        authProvider.authEndpoints,
         authProvider.clientId,
         authProvider.scopes,
         client,
         prompt,
+        authEndpoints: authProvider.authEndpoints,
       );
 
       final codePushClient = _buildCodePushClient(
@@ -231,11 +231,11 @@ class Auth {
     final client = http.Client();
     try {
       _credentials = await _obtainAccessCredentials(
-        authProvider.authEndpoints,
         authProvider.clientId,
         authProvider.scopes,
         client,
         prompt,
+        authEndpoints: authProvider.authEndpoints,
       );
 
       final codePushClient = _buildCodePushClient(httpClient: this.client);
@@ -271,9 +271,8 @@ class Auth {
         // TODO(bryanoltman): Remove this legacy behavior after July 2024 or
         // next major release.
         logger.warn('''
-The value of $shorebirdTokenEnvVar is not a valid base64-encoded token. This
-will become an error in the next major release. Run `shorebird login:ci` before
-then to obtain a new token.''');
+$shorebirdTokenEnvVar needs to be updated before the next major release.
+Run `shorebird login:ci` to obtain a new token.''');
         _token = CiToken(
           refreshToken: envToken,
           authProvider: AuthProvider.google,
@@ -368,7 +367,7 @@ extension OauthAuthProvider on Jwt {
 
 extension OauthValues on AuthProvider {
   oauth2.AuthEndpoints get authEndpoints => switch (this) {
-        (AuthProvider.google) => oauth2.GoogleAuthEndpoints(),
+        (AuthProvider.google) => const oauth2.GoogleAuthEndpoints(),
         (AuthProvider.microsoft) => MicrosoftAuthEndpoints(),
       };
 

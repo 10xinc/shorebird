@@ -106,6 +106,20 @@ flutter:
       File(
         p.join(projectRoot.path, 'shorebird.yaml'),
       ).writeAsStringSync('app_id: $appId');
+      // Create an xcframework in the release directory to simulate running this
+      // command a subsequent time.
+      Directory(p.join(projectRoot.path, 'release', 'Flutter.xcframework'))
+          .createSync(recursive: true);
+      Directory(
+        p.join(
+          projectRoot.path,
+          'build',
+          'ios',
+          'framework',
+          'Release',
+          'Flutter.xcframework',
+        ),
+      ).createSync(recursive: true);
     }
 
     setUpAll(() {
@@ -138,12 +152,27 @@ flutter:
       when(() => shorebirdEnv.getShorebirdYaml()).thenReturn(shorebirdYaml);
       when(() => shorebirdEnv.shorebirdRoot).thenReturn(shorebirdRoot);
       when(
+        () => shorebirdEnv.copyWith(
+          flutterRevisionOverride: any(named: 'flutterRevisionOverride'),
+        ),
+      ).thenAnswer((invocation) {
+        when(() => shorebirdEnv.flutterRevision).thenReturn(
+          invocation.namedArguments[#flutterRevisionOverride] as String,
+        );
+        return shorebirdEnv;
+      });
+      when(
         () => shorebirdEnv.getShorebirdProjectRoot(),
       ).thenReturn(projectRoot);
       when(() => shorebirdEnv.flutterRevision).thenReturn(flutterRevision);
       when(
         () => shorebirdFlutter.getVersionAndRevision(),
       ).thenAnswer((_) async => flutterVersionAndRevision);
+      when(
+        () => shorebirdFlutter.installRevision(
+          revision: any(named: 'revision'),
+        ),
+      ).thenAnswer((_) async => {});
       when(
         () => shorebirdProcess.run(
           'flutter',
@@ -308,21 +337,55 @@ $exception''',
           when(
             () => shorebirdFlutter.getRevisionForVersion(any()),
           ).thenAnswer((_) async => revision);
-          when(
-            () => shorebirdFlutter.useRevision(
-              revision: any(named: 'revision'),
-            ),
-          ).thenAnswer((_) async {});
         });
 
-        test(
-            'uses specified flutter version to build '
-            'and reverts to original flutter version', () async {
+        test('uses specified flutter version build', () async {
+          when(
+            () => shorebirdProcess.run(
+              'flutter',
+              any(),
+              runInShell: any(named: 'runInShell'),
+            ),
+          ).thenAnswer((_) async {
+            // Ensure we're using the correct flutter version.
+            expect(shorebirdEnv.flutterRevision, equals(revision));
+            return flutterBuildProcessResult;
+          });
+
+          setUpProjectRoot();
+
           await runWithOverrides(command.run);
-          verifyInOrder([
-            () => shorebirdFlutter.useRevision(revision: revision),
-            () => shorebirdFlutter.useRevision(revision: flutterRevision),
-          ]);
+
+          verify(() => shorebirdFlutter.installRevision(revision: revision))
+              .called(1);
+          verify(
+            () => codePushClientWrapper.createRelease(
+              appId: appId,
+              version: version,
+              flutterRevision: revision,
+              platform: releasePlatform,
+            ),
+          ).called(1);
+        });
+
+        group('when flutter version install fails', () {
+          setUp(() {
+            when(
+              () => shorebirdFlutter.installRevision(
+                revision: any(named: 'revision'),
+              ),
+            ).thenThrow(Exception('oops'));
+          });
+
+          test('exits with code 70', () async {
+            setUpProjectRoot();
+            final result = await runWithOverrides(command.run);
+
+            expect(result, equals(ExitCode.software.code));
+            verify(
+              () => shorebirdFlutter.installRevision(revision: revision),
+            ).called(1);
+          });
         });
       });
     });
@@ -417,9 +480,10 @@ $exception''',
           any(
             that: stringContainsInOrder(
               [
-                'Your next step is to include the .xcframework files in',
-                p.join('build', 'ios', 'framework', 'Release'),
-                'in your iOS app.',
+                'Your next step is to add the .xcframework files found in',
+                'release',
+                'to your iOS app.',
+                '''Embed the App.xcframework and ShorebirdFlutter.framework in your Xcode project''',
               ],
             ),
           ),
@@ -432,7 +496,7 @@ $exception''',
           appFrameworkPath: any(
             named: 'appFrameworkPath',
             that: endsWith(
-              p.join('build', 'ios', 'framework', 'Release', 'App.xcframework'),
+              p.join('release', 'App.xcframework'),
             ),
           ),
         ),

@@ -45,6 +45,25 @@ void main() {
       when(() => platform.script).thenReturn(platformScript);
     });
 
+    group('copyWith', () {
+      test('creates a new instance with the provided values', () {
+        final newEnv = runWithOverrides(
+          () => shorebirdEnv.copyWith(flutterRevisionOverride: 'test'),
+        );
+        expect(newEnv, isNot(same(shorebirdEnv)));
+        expect(newEnv.flutterRevision, equals('test'));
+      });
+
+      test('uses existing values when not provided', () {
+        final newEnv = runWithOverrides(() => shorebirdEnv.copyWith());
+        expect(newEnv, isNot(same(shorebirdEnv)));
+        expect(
+          runWithOverrides(() => newEnv.flutterRevision),
+          equals(flutterRevision),
+        );
+      });
+    });
+
     group('getShorebirdYamlFile', () {
       test('returns correct file', () {
         final tempDir = Directory.systemTemp.createTempSync();
@@ -368,81 +387,6 @@ flutter:
             getCurrentDirectory: () => tempDir,
           ),
           equals('test-package'),
-        );
-      });
-    });
-
-    group('isShorebirdInitialized', () {
-      test('returns false when shorebird.yaml does not exist', () {
-        final tempDir = Directory('temp');
-        expect(
-          IOOverrides.runZoned(
-            () => runWithOverrides(() => shorebirdEnv.isShorebirdInitialized),
-            getCurrentDirectory: () => tempDir,
-          ),
-          isFalse,
-        );
-      });
-
-      test(
-          'returns false when shorebird.yaml exists '
-          'but pubspec does not contain shorebird.yaml', () {
-        final tempDir = Directory.systemTemp.createTempSync();
-        File(
-          p.join(tempDir.path, 'shorebird.yaml'),
-        ).writeAsStringSync('app_id: test-app-id');
-        File(
-          p.join(tempDir.path, 'pubspec.yaml'),
-        ).writeAsStringSync('name: test');
-        expect(
-          IOOverrides.runZoned(
-            () => runWithOverrides(() => shorebirdEnv.isShorebirdInitialized),
-            getCurrentDirectory: () => tempDir,
-          ),
-          isFalse,
-        );
-      });
-
-      test(
-          'returns false when shorebird.yaml does not exist '
-          'but pubspec contains shorebird.yaml', () {
-        final tempDir = Directory.systemTemp.createTempSync();
-        File(
-          p.join(tempDir.path, 'pubspec.yaml'),
-        ).writeAsStringSync('''
-name: test
-flutter:
-  assets:
-    - shorebird.yaml''');
-        expect(
-          IOOverrides.runZoned(
-            () => runWithOverrides(() => shorebirdEnv.isShorebirdInitialized),
-            getCurrentDirectory: () => tempDir,
-          ),
-          isFalse,
-        );
-      });
-
-      test(
-          'returns true when shorebird.yaml exists '
-          'and pubspec contains shorebird.yaml', () {
-        final tempDir = Directory.systemTemp.createTempSync();
-        File(
-          p.join(tempDir.path, 'shorebird.yaml'),
-        ).writeAsStringSync('app_id: test-app-id');
-        File(
-          p.join(tempDir.path, 'pubspec.yaml'),
-        ).writeAsStringSync('''
-name: test
-flutter:
-  assets:
-    - shorebird.yaml''');
-        expect(
-          IOOverrides.runZoned(
-            () => runWithOverrides(() => shorebirdEnv.isShorebirdInitialized),
-            getCurrentDirectory: () => tempDir,
-          ),
-          isTrue,
         );
       });
     });

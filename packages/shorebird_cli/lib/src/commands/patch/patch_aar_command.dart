@@ -136,22 +136,6 @@ Please re-run the release command for this version or create a new release.''');
       return ExitCode.software.code;
     }
 
-    final shorebirdFlutterRevision = shorebirdEnv.flutterRevision;
-    if (release.flutterRevision != shorebirdFlutterRevision) {
-      final installFlutterRevisionProgress = logger.progress(
-        'Switching to Flutter revision ${release.flutterRevision}',
-      );
-      try {
-        await shorebirdFlutter.installRevision(
-          revision: release.flutterRevision,
-        );
-        installFlutterRevisionProgress.complete();
-      } catch (error) {
-        installFlutterRevisionProgress.fail('$error');
-        return ExitCode.software.code;
-      }
-    }
-
     const platform = ReleasePlatform.android;
     final releaseArtifacts = await codePushClientWrapper.getReleaseArtifacts(
       appId: appId,
@@ -176,107 +160,120 @@ Please re-run the release command for this version or create a new release.''');
       return ExitCode.software.code;
     }
 
-    final buildNumber = results['build-number'] as String;
-    final buildProgress = logger.progress('Building patch');
     try {
-      await runScoped(
-        () => buildAar(buildNumber: buildNumber),
-        values: {
-          shorebirdEnvRef.overrideWith(
-            () => ShorebirdEnv(
-              flutterRevisionOverride: release.flutterRevision,
+      await shorebirdFlutter.installRevision(revision: release.flutterRevision);
+    } catch (_) {
+      return ExitCode.software.code;
+    }
+
+    final releaseFlutterShorebirdEnv = shorebirdEnv.copyWith(
+      flutterRevisionOverride: release.flutterRevision,
+    );
+
+    return await runScoped(
+      () async {
+        final buildNumber = results['build-number'] as String;
+        final buildProgress = logger.progress('Building patch');
+        try {
+          await buildAar(buildNumber: buildNumber);
+          buildProgress.complete();
+        } on ProcessException catch (error) {
+          buildProgress.fail('Failed to build: ${error.message}');
+          return ExitCode.software.code;
+        }
+
+        final extractedAarDir = await extractAar(
+          packageName: shorebirdEnv.androidPackageName!,
+          buildNumber: buildNumber,
+          unzipFn: _unzipFn,
+        );
+
+        final DiffStatus diffStatus;
+        try {
+          diffStatus =
+              await patchDiffChecker.confirmUnpatchableDiffsIfNecessary(
+            localArtifact: File(
+              aarArtifactPath(
+                packageName: shorebirdEnv.androidPackageName!,
+                buildNumber: buildNumber,
+              ),
             ),
-          ),
-        },
-      );
-      buildProgress.complete();
-    } on ProcessException catch (error) {
-      buildProgress.fail('Failed to build: ${error.message}');
-      return ExitCode.software.code;
-    }
+            releaseArtifact: await artifactManager
+                .downloadFile(Uri.parse(releaseAarArtifact.url)),
+            archiveDiffer: _archiveDiffer,
+            force: force,
+          );
+        } on UserCancelledException {
+          return ExitCode.success.code;
+        } on UnpatchableChangeException {
+          logger.info('Exiting.');
+          return ExitCode.software.code;
+        }
 
-    final extractedAarDir = await extractAar(
-      packageName: shorebirdEnv.androidPackageName!,
-      buildNumber: buildNumber,
-      unzipFn: _unzipFn,
-    );
+        final patchArtifactBundles = await _createPatchArtifacts(
+          releaseArtifactPaths: releaseArtifactPaths,
+          extractedAarDirectory: extractedAarDir,
+        );
+        if (patchArtifactBundles == null) {
+          return ExitCode.software.code;
+        }
 
-    try {
-      await patchDiffChecker.confirmUnpatchableDiffsIfNecessary(
-        localArtifact: File(
-          aarArtifactPath(
-            packageName: shorebirdEnv.androidPackageName!,
-            buildNumber: buildNumber,
-          ),
-        ),
-        releaseArtifact: await artifactManager
-            .downloadFile(Uri.parse(releaseAarArtifact.url)),
-        archiveDiffer: _archiveDiffer,
-        force: force,
-      );
-    } on UserCancelledException {
-      return ExitCode.success.code;
-    } on UnpatchableChangeException {
-      logger.info('Exiting.');
-      return ExitCode.software.code;
-    }
+        final archMetadata = patchArtifactBundles.keys.map((arch) {
+          final name = arch.name;
+          final size = formatBytes(patchArtifactBundles[arch]!.size);
+          return '$name ($size)';
+        });
 
-    final patchArtifactBundles = await _createPatchArtifacts(
-      releaseArtifactPaths: releaseArtifactPaths,
-      extractedAarDirectory: extractedAarDir,
-    );
-    if (patchArtifactBundles == null) {
-      return ExitCode.software.code;
-    }
+        if (dryRun) {
+          logger
+            ..info('No issues detected.')
+            ..info('The server may enforce additional checks.');
+          return ExitCode.success.code;
+        }
 
-    final archMetadata = patchArtifactBundles.keys.map((arch) {
-      final name = arch.name;
-      final size = formatBytes(patchArtifactBundles[arch]!.size);
-      return '$name ($size)';
-    });
+        final summary = [
+          '''📱 App: ${lightCyan.wrap(app.displayName)} ${lightCyan.wrap('(${app.appId})')}''',
+          '📦 Release Version: ${lightCyan.wrap(releaseVersion)}',
+          '''🕹️  Platform: ${lightCyan.wrap(platform.name)} ${lightCyan.wrap('[${archMetadata.join(', ')}]')}''',
+          '🟢 Track: ${lightCyan.wrap('Production')}',
+        ];
 
-    if (dryRun) {
-      logger
-        ..info('No issues detected.')
-        ..info('The server may enforce additional checks.');
-      return ExitCode.success.code;
-    }
-
-    final summary = [
-      '''📱 App: ${lightCyan.wrap(app.displayName)} ${lightCyan.wrap('(${app.appId})')}''',
-      '📦 Release Version: ${lightCyan.wrap(releaseVersion)}',
-      '''🕹️  Platform: ${lightCyan.wrap(platform.name)} ${lightCyan.wrap('[${archMetadata.join(', ')}]')}''',
-      '🟢 Track: ${lightCyan.wrap('Production')}',
-    ];
-
-    logger.info(
-      '''
+        logger.info(
+          '''
 
 ${styleBold.wrap(lightGreen.wrap('🚀 Ready to publish a new patch!'))}
 
 ${summary.join('\n')}
 ''',
-    );
+        );
 
-    final needsConfirmation = !force && !shorebirdEnv.isRunningOnCI;
-    if (needsConfirmation) {
-      final confirm = logger.confirm('Would you like to continue?');
+        final needsConfirmation = !force && !shorebirdEnv.isRunningOnCI;
+        if (needsConfirmation) {
+          final confirm = logger.confirm('Would you like to continue?');
 
-      if (!confirm) {
-        logger.info('Aborting.');
+          if (!confirm) {
+            logger.info('Aborting.');
+            return ExitCode.success.code;
+          }
+        }
+
+        await codePushClientWrapper.publishPatch(
+          appId: appId,
+          releaseId: release.id,
+          wasForced: force,
+          hasAssetChanges: diffStatus.hasAssetChanges,
+          hasNativeChanges: diffStatus.hasNativeChanges,
+          platform: platform,
+          track: DeploymentTrack.production,
+          patchArtifactBundles: patchArtifactBundles,
+        );
+
         return ExitCode.success.code;
-      }
-    }
-
-    await codePushClientWrapper.publishPatch(
-      appId: appId,
-      releaseId: release.id,
-      platform: platform,
-      track: DeploymentTrack.production,
-      patchArtifactBundles: patchArtifactBundles,
+      },
+      values: {
+        shorebirdEnvRef.overrideWith(() => releaseFlutterShorebirdEnv),
+      },
     );
-
-    return ExitCode.success.code;
   }
 
   Future<String?> _promptForReleaseVersion(List<Release> releases) async {
