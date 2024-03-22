@@ -1025,6 +1025,28 @@ Please bump your version number and try again.''',
           ).thenAnswer((_) async {});
         });
 
+        test('exits with code 70 when artifacts cannot be found', () async {
+          await expectLater(
+            () async => runWithOverrides(
+              () async => codePushClientWrapper.createAndroidReleaseArtifacts(
+                appId: app.appId,
+                releaseId: releaseId,
+                platform: releasePlatform,
+                projectRoot: projectRoot.path,
+                aabPath: p.join(projectRoot.path, aabPath),
+                architectures: ShorebirdBuildMixin.allAndroidArchitectures,
+              ),
+            ),
+            exitsWithCode(ExitCode.software),
+          );
+
+          verify(
+            () => progress.fail(
+              any(that: contains('Cannot find release build artifacts')),
+            ),
+          ).called(1);
+        });
+
         test('exits with code 70 when artifact creation fails', () async {
           const error = 'something went wrong';
           when(
@@ -1782,7 +1804,6 @@ Please bump your version number and try again.''',
             () => codePushClient.createPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: any(named: 'wasForced'),
               hasAssetChanges: any(named: 'hasAssetChanges'),
               hasNativeChanges: any(named: 'hasNativeChanges'),
             ),
@@ -1793,7 +1814,6 @@ Please bump your version number and try again.''',
               () => codePushClientWrapper.createPatch(
                 appId: appId,
                 releaseId: releaseId,
-                wasForced: false,
                 hasAssetChanges: false,
                 hasNativeChanges: false,
               ),
@@ -1808,7 +1828,6 @@ Please bump your version number and try again.''',
             () => codePushClient.createPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: any(named: 'wasForced'),
               hasAssetChanges: any(named: 'hasAssetChanges'),
               hasNativeChanges: any(named: 'hasNativeChanges'),
             ),
@@ -1818,7 +1837,6 @@ Please bump your version number and try again.''',
             () => codePushClientWrapper.createPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: false,
               hasAssetChanges: false,
               hasNativeChanges: false,
             ),
@@ -1947,7 +1965,6 @@ Please bump your version number and try again.''',
             () => codePushClient.createPatch(
               appId: any(named: 'appId'),
               releaseId: any(named: 'releaseId'),
-              wasForced: any(named: 'wasForced'),
               hasAssetChanges: any(named: 'hasAssetChanges'),
               hasNativeChanges: any(named: 'hasNativeChanges'),
             ),
@@ -1979,7 +1996,6 @@ Please bump your version number and try again.''',
             () => codePushClientWrapper.publishPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: false,
               hasAssetChanges: true,
               hasNativeChanges: false,
               platform: releasePlatform,
@@ -1992,7 +2008,6 @@ Please bump your version number and try again.''',
             () => codePushClient.createPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: false,
               hasAssetChanges: true,
               hasNativeChanges: false,
             ),
@@ -2039,7 +2054,6 @@ Please bump your version number and try again.''',
             () => codePushClientWrapper.publishPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: true,
               hasAssetChanges: false,
               hasNativeChanges: true,
               platform: releasePlatform,
@@ -2052,7 +2066,6 @@ Please bump your version number and try again.''',
             () => codePushClient.createPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: true,
               hasAssetChanges: false,
               hasNativeChanges: true,
             ),
@@ -2088,7 +2101,6 @@ Please bump your version number and try again.''',
             () => codePushClientWrapper.publishPatch(
               appId: appId,
               releaseId: releaseId,
-              wasForced: false,
               hasAssetChanges: false,
               hasNativeChanges: false,
               platform: releasePlatform,

@@ -10,6 +10,7 @@ import 'package:shorebird_cli/src/archive_analysis/archive_analysis.dart';
 import 'package:shorebird_cli/src/artifact_manager.dart';
 import 'package:shorebird_cli/src/code_push_client_wrapper.dart';
 import 'package:shorebird_cli/src/command.dart';
+import 'package:shorebird_cli/src/commands/commands.dart';
 import 'package:shorebird_cli/src/config/config.dart';
 import 'package:shorebird_cli/src/deployment_track.dart';
 import 'package:shorebird_cli/src/doctor.dart';
@@ -17,9 +18,9 @@ import 'package:shorebird_cli/src/engine_config.dart';
 import 'package:shorebird_cli/src/executables/executables.dart';
 import 'package:shorebird_cli/src/extensions/arg_results.dart';
 import 'package:shorebird_cli/src/formatters/file_size_formatter.dart';
-import 'package:shorebird_cli/src/ios.dart';
 import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/patch_diff_checker.dart';
+import 'package:shorebird_cli/src/platform/platform.dart';
 import 'package:shorebird_cli/src/shorebird_artifact_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_artifacts.dart';
 import 'package:shorebird_cli/src/shorebird_build_mixin.dart';
@@ -61,10 +62,25 @@ If this option is not provided, the version number will be determined from the p
         help: 'Codesign the application bundle.',
         defaultsTo: true,
       )
+      ..addOption(
+        exportOptionsPlistArgName,
+        help:
+            '''Export an IPA with these options. See "xcodebuild -h" for available exportOptionsPlist keys.''',
+      )
       ..addFlag(
         'force',
         abbr: 'f',
-        help: 'Patch without confirmation if there are no errors.',
+        help: PatchCommand.forceHelpText,
+        negatable: false,
+      )
+      ..addFlag(
+        'allow-native-diffs',
+        help: PatchCommand.allowNativeDiffsHelpText,
+        negatable: false,
+      )
+      ..addFlag(
+        'allow-asset-diffs',
+        help: PatchCommand.allowAssetDiffsHelpText,
         negatable: false,
       )
       ..addFlag(
@@ -106,16 +122,20 @@ If this option is not provided, the version number will be determined from the p
       return error.exitCode.code;
     }
 
-    showiOSStatusWarning();
-
     final force = results['force'] == true;
-    final dryRun = results['dry-run'] == true;
-    final isStaging = results['staging'] == true;
-
-    if (force && dryRun) {
-      logger.err('Cannot use both --force and --dry-run.');
+    if (force) {
+      logger
+        ..err(PatchCommand.forceDeprecationErrorMessage)
+        ..info(PatchCommand.forceDeprecationExplanation);
       return ExitCode.usage.code;
     }
+
+    showiOSStatusWarning();
+
+    final allowAssetDiffs = results['allow-asset-diffs'] == true;
+    final allowNativeDiffs = results['allow-native-diffs'] == true;
+    final dryRun = results['dry-run'] == true;
+    final isStaging = results['staging'] == true;
 
     const arch = 'aarch64';
     const releasePlatform = ReleasePlatform.ios;
@@ -126,6 +146,14 @@ If this option is not provided, the version number will be determined from the p
     final app = await codePushClientWrapper.getApp(appId: appId);
     var hasBuiltWithActiveFlutter = false;
 
+    final File exportOptionsPlist;
+    try {
+      exportOptionsPlist = ios.exportOptionsPlistFromArgs(results);
+    } catch (error) {
+      logger.err('$error');
+      return ExitCode.usage.code;
+    }
+
     final String releaseVersion;
     final argReleaseVersion = results['release-version'] as String?;
     if (argReleaseVersion != null) {
@@ -134,7 +162,11 @@ If this option is not provided, the version number will be determined from the p
     } else {
       logger.detail('No release version provided. Determining from archive.');
       try {
-        await _buildPatch(flavor: flavor, target: target);
+        await _buildPatch(
+          exportOptionsPlist: exportOptionsPlist,
+          flavor: flavor,
+          target: target,
+        );
       } catch (_) {
         return ExitCode.software.code;
       }
@@ -193,7 +225,11 @@ Current Flutter Revision: $currentFlutterRevision
         if (!hasBuiltWithActiveFlutter ||
             release.flutterRevision != currentFlutterRevision) {
           try {
-            await _buildPatch(flavor: flavor, target: target);
+            await _buildPatch(
+              exportOptionsPlist: exportOptionsPlist,
+              flavor: flavor,
+              target: target,
+            );
           } catch (_) {
             return ExitCode.software.code;
           }
@@ -235,7 +271,8 @@ Current Flutter Revision: $currentFlutterRevision
             localArtifactDirectory: Directory(archivePath),
             releaseArtifact: releaseArtifactZipFile,
             archiveDiffer: _archiveDiffer,
-            force: force,
+            allowAssetChanges: allowAssetDiffs,
+            allowNativeChanges: allowNativeDiffs,
           );
         } on UserCancelledException {
           return ExitCode.success.code;
@@ -344,7 +381,7 @@ ${summary.join('\n')}
 ''',
         );
 
-        final needsConfirmation = !force && !shorebirdEnv.isRunningOnCI;
+        final needsConfirmation = !shorebirdEnv.isRunningOnCI;
         if (needsConfirmation) {
           final confirm = logger.confirm('Would you like to continue?');
 
@@ -357,7 +394,6 @@ ${summary.join('\n')}
         await codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: release.id,
-          wasForced: force,
           hasAssetChanges: diffStatus.hasAssetChanges,
           hasNativeChanges: diffStatus.hasNativeChanges,
           platform: releasePlatform,
@@ -420,6 +456,7 @@ ${summary.join('\n')}
   }
 
   Future<void> _buildPatch({
+    required File exportOptionsPlist,
     required String? flavor,
     required String? target,
   }) async {
@@ -430,6 +467,7 @@ ${summary.join('\n')}
       // was, we will erroneously report native diffs.
       await buildIpa(
         codesign: shouldCodesign,
+        exportOptionsPlist: exportOptionsPlist,
         flavor: flavor,
         target: target,
       );

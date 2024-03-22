@@ -22,6 +22,7 @@ import 'package:shorebird_cli/src/logger.dart';
 import 'package:shorebird_cli/src/os/operating_system_interface.dart';
 import 'package:shorebird_cli/src/patch_diff_checker.dart';
 import 'package:shorebird_cli/src/platform.dart';
+import 'package:shorebird_cli/src/platform/ios.dart';
 import 'package:shorebird_cli/src/shorebird_artifacts.dart';
 import 'package:shorebird_cli/src/shorebird_build_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
@@ -153,6 +154,7 @@ flutter:
     late File releaseArtifactFile;
     late ShorebirdArtifacts shorebirdArtifacts;
     late Doctor doctor;
+    late Ios ios;
     late IosArchiveDiffer archiveDiffer;
     late Progress progress;
     late Logger logger;
@@ -180,6 +182,7 @@ flutter:
           codePushClientWrapperRef.overrideWith(() => codePushClientWrapper),
           doctorRef.overrideWith(() => doctor),
           engineConfigRef.overrideWith(() => engineConfig),
+          iosRef.overrideWith(() => ios),
           shorebirdArtifactsRef.overrideWith(() => shorebirdArtifacts),
           loggerRef.overrideWith(() => logger),
           osInterfaceRef.overrideWith(() => operatingSystemInterface),
@@ -271,6 +274,7 @@ flutter:
       codePushClientWrapper = MockCodePushClientWrapper();
       doctor = MockDoctor();
       engineConfig = MockEngineConfig();
+      ios = MockIos();
       shorebirdArtifacts = MockShorebirdArtifacts();
       shorebirdRoot = Directory.systemTemp.createTempSync();
       projectRoot = Directory.systemTemp.createTempSync();
@@ -319,9 +323,10 @@ flutter:
       shorebirdProcess = MockShorebirdProcess();
       shorebirdValidator = MockShorebirdValidator();
 
+      when(() => argResults['allow-asset-diffs']).thenReturn(false);
+      when(() => argResults['allow-native-diffs']).thenReturn(false);
       when(() => argResults['arch']).thenReturn(arch);
       when(() => argResults['dry-run']).thenReturn(false);
-      when(() => argResults['force']).thenReturn(false);
       when(() => argResults['codesign']).thenReturn(true);
       when(() => argResults['staging']).thenReturn(false);
       when(() => argResults.rest).thenReturn([]);
@@ -394,7 +399,6 @@ flutter:
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
-          wasForced: any(named: 'wasForced'),
           hasAssetChanges: any(named: 'hasAssetChanges'),
           hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
@@ -404,6 +408,8 @@ flutter:
       ).thenAnswer((_) async {});
       when(() => doctor.iosCommandValidators).thenReturn([flutterValidator]);
       when(() => engineConfig.localEngine).thenReturn(null);
+      when(() => ios.exportOptionsPlistFromArgs(argResults))
+          .thenReturn(File('.'));
       when(flutterValidator.validate).thenAnswer((_) async => []);
       when(() => logger.confirm(any())).thenReturn(true);
       when(() => logger.progress(any())).thenReturn(progress);
@@ -490,7 +496,8 @@ flutter:
           localArtifactDirectory: any(named: 'localArtifactDirectory'),
           releaseArtifact: any(named: 'releaseArtifact'),
           archiveDiffer: archiveDiffer,
-          force: any(named: 'force'),
+          allowAssetChanges: any(named: 'allowAssetChanges'),
+          allowNativeChanges: any(named: 'allowNativeChanges'),
         ),
       ).thenAnswer(
         (_) async => DiffStatus(
@@ -536,14 +543,33 @@ flutter:
       ).called(1);
     });
 
-    test(
-        'exits with usage code when '
-        'both --dry-run and --force are specified', () async {
-      when(() => argResults['dry-run']).thenReturn(true);
+    test('exits with explanation if force flag is used', () async {
       when(() => argResults['force']).thenReturn(true);
-      setUpProjectRoot();
-      final exitCode = await runWithOverrides(command.run);
-      expect(exitCode, equals(ExitCode.usage.code));
+
+      await expectLater(
+        runWithOverrides(command.run),
+        completion(equals(ExitCode.usage.code)),
+      );
+
+      verify(() => logger.err(PatchCommand.forceDeprecationErrorMessage))
+          .called(1);
+      verify(() => logger.info(PatchCommand.forceDeprecationExplanation))
+          .called(1);
+    });
+
+    group('when exportOptionsPlistFromArgs throws exception', () {
+      setUp(() {
+        when(() => ios.exportOptionsPlistFromArgs(argResults))
+            .thenThrow(ArgumentError('bad args'));
+      });
+
+      test('logs error and exits with usage code', () async {
+        setUpProjectRoot();
+        final exitCode = await runWithOverrides(command.run);
+
+        expect(exitCode, equals(ExitCode.usage.code));
+        verify(() => logger.err('Invalid argument(s): bad args')).called(1);
+      });
     });
 
     test('exits with code 70 when building fails', () async {
@@ -988,13 +1014,13 @@ Please re-run the release command for this version or create a new release.'''),
     test(
         '''exits with code 0 if zipAndConfirmUnpatchableDiffsIfNecessary throws UserCancelledException''',
         () async {
-      when(() => argResults['force']).thenReturn(false);
       when(
         () => patchDiffChecker.zipAndConfirmUnpatchableDiffsIfNecessary(
           localArtifactDirectory: any(named: 'localArtifactDirectory'),
           releaseArtifact: any(named: 'releaseArtifact'),
           archiveDiffer: archiveDiffer,
-          force: any(named: 'force'),
+          allowAssetChanges: any(named: 'allowAssetChanges'),
+          allowNativeChanges: any(named: 'allowNativeChanges'),
         ),
       ).thenThrow(UserCancelledException());
       setUpProjectRoot();
@@ -1008,14 +1034,14 @@ Please re-run the release command for this version or create a new release.'''),
           localArtifactDirectory: any(named: 'localArtifactDirectory'),
           releaseArtifact: releaseArtifactFile,
           archiveDiffer: archiveDiffer,
-          force: false,
+          allowAssetChanges: false,
+          allowNativeChanges: false,
         ),
       ).called(1);
       verifyNever(
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
-          wasForced: any(named: 'wasForced'),
           hasAssetChanges: any(named: 'hasAssetChanges'),
           hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
@@ -1065,13 +1091,13 @@ Please re-run the release command for this version or create a new release.'''),
     test(
         '''exits with code 70 if zipAndConfirmUnpatchableDiffsIfNecessary throws UnpatchableChangeException''',
         () async {
-      when(() => argResults['force']).thenReturn(false);
       when(
         () => patchDiffChecker.zipAndConfirmUnpatchableDiffsIfNecessary(
           localArtifactDirectory: any(named: 'localArtifactDirectory'),
           releaseArtifact: any(named: 'releaseArtifact'),
           archiveDiffer: archiveDiffer,
-          force: any(named: 'force'),
+          allowAssetChanges: any(named: 'allowAssetChanges'),
+          allowNativeChanges: any(named: 'allowNativeChanges'),
         ),
       ).thenThrow(UnpatchableChangeException());
       setUpProjectRoot();
@@ -1085,14 +1111,14 @@ Please re-run the release command for this version or create a new release.'''),
           localArtifactDirectory: any(named: 'localArtifactDirectory'),
           releaseArtifact: releaseArtifactFile,
           archiveDiffer: archiveDiffer,
-          force: false,
+          allowAssetChanges: false,
+          allowNativeChanges: false,
         ),
       ).called(1);
       verifyNever(
         () => codePushClientWrapper.publishPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
-          wasForced: any(named: 'wasForced'),
           hasAssetChanges: any(named: 'hasAssetChanges'),
           hasNativeChanges: any(named: 'hasNativeChanges'),
           platform: any(named: 'platform'),
@@ -1273,7 +1299,6 @@ Please re-run the release command for this version or create a new release.'''),
           () => codePushClientWrapper.publishPatch(
             appId: appId,
             releaseId: postLinkerRelease.id,
-            wasForced: false,
             hasAssetChanges: false,
             hasNativeChanges: false,
             platform: releasePlatform,
@@ -1298,7 +1323,6 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.createPatch(
           appId: any(named: 'appId'),
           releaseId: any(named: 'releaseId'),
-          wasForced: any(named: 'wasForced'),
           hasAssetChanges: any(named: 'hasAssetChanges'),
           hasNativeChanges: any(named: 'hasNativeChanges'),
         ),
@@ -1306,29 +1330,46 @@ Please re-run the release command for this version or create a new release.'''),
       verify(() => logger.info('No issues detected.')).called(1);
     });
 
-    test('does not prompt on --force', () async {
-      when(() => argResults['force']).thenReturn(true);
+    test(
+        '''forwards allow-asset-diffs and allow-native-diffs to patch diff checker''',
+        () async {
       setUpProjectRoot();
       setUpProjectRootArtifacts();
-      final exitCode = await runWithOverrides(command.run);
-      expect(exitCode, equals(ExitCode.success.code));
-      verifyNever(() => logger.confirm(any()));
+
+      when(() => argResults['allow-asset-diffs']).thenReturn(true);
+      when(() => argResults['allow-native-diffs']).thenReturn(true);
+
+      await runWithOverrides(command.run);
+
       verify(
-        () => codePushClientWrapper.publishPatch(
-          appId: appId,
-          releaseId: preLinkerRelease.id,
-          wasForced: true,
-          hasAssetChanges: false,
-          hasNativeChanges: false,
-          platform: releasePlatform,
-          track: track,
-          patchArtifactBundles: any(named: 'patchArtifactBundles'),
+        () => patchDiffChecker.zipAndConfirmUnpatchableDiffsIfNecessary(
+          localArtifactDirectory: any(named: 'localArtifactDirectory'),
+          releaseArtifact: any(named: 'releaseArtifact'),
+          archiveDiffer: archiveDiffer,
+          allowAssetChanges: true,
+          allowNativeChanges: true,
+        ),
+      ).called(1);
+
+      when(() => argResults['allow-asset-diffs']).thenReturn(false);
+      when(() => argResults['allow-native-diffs']).thenReturn(false);
+
+      await runWithOverrides(command.run);
+
+      verify(
+        () => patchDiffChecker.zipAndConfirmUnpatchableDiffsIfNecessary(
+          localArtifactDirectory: any(named: 'localArtifactDirectory'),
+          releaseArtifact: any(named: 'releaseArtifact'),
+          archiveDiffer: archiveDiffer,
+          allowAssetChanges: false,
+          allowNativeChanges: false,
         ),
       ).called(1);
     });
 
     test('reports when patch has asset and native changes', () async {
-      when(() => argResults['force']).thenReturn(true);
+      when(() => argResults['allow-asset-diffs']).thenReturn(true);
+      when(() => argResults['allow-native-diffs']).thenReturn(true);
       when(() => archiveDiffer.containsPotentiallyBreakingAssetDiffs(any()))
           .thenReturn(true);
       when(() => archiveDiffer.containsPotentiallyBreakingNativeDiffs(any()))
@@ -1340,7 +1381,8 @@ Please re-run the release command for this version or create a new release.'''),
           localArtifactDirectory: any(named: 'localArtifactDirectory'),
           releaseArtifact: any(named: 'releaseArtifact'),
           archiveDiffer: archiveDiffer,
-          force: any(named: 'force'),
+          allowAssetChanges: any(named: 'allowAssetChanges'),
+          allowNativeChanges: any(named: 'allowNativeChanges'),
         ),
       ).thenAnswer(
         (_) async => DiffStatus(
@@ -1355,12 +1397,10 @@ Please re-run the release command for this version or create a new release.'''),
       final exitCode = await runWithOverrides(command.run);
 
       expect(exitCode, equals(ExitCode.success.code));
-      verifyNever(() => logger.confirm(any()));
       verify(
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: preLinkerRelease.id,
-          wasForced: true,
           hasAssetChanges: true,
           hasNativeChanges: true,
           platform: releasePlatform,
@@ -1389,7 +1429,6 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: preLinkerRelease.id,
-          wasForced: false,
           hasAssetChanges: false,
           hasNativeChanges: false,
           platform: releasePlatform,
@@ -1436,7 +1475,6 @@ Please re-run the release command for this version or create a new release.'''),
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: preLinkerRelease.id,
-          wasForced: false,
           hasAssetChanges: false,
           hasNativeChanges: false,
           platform: releasePlatform,
@@ -1529,7 +1567,6 @@ flavors:
         () => codePushClientWrapper.publishPatch(
           appId: appId,
           releaseId: preLinkerRelease.id,
-          wasForced: false,
           hasAssetChanges: false,
           hasNativeChanges: false,
           platform: releasePlatform,

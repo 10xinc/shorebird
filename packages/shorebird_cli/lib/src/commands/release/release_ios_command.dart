@@ -7,10 +7,12 @@ import 'package:scoped/scoped.dart';
 import 'package:shorebird_cli/src/archive_analysis/archive_analysis.dart';
 import 'package:shorebird_cli/src/code_push_client_wrapper.dart';
 import 'package:shorebird_cli/src/command.dart';
+import 'package:shorebird_cli/src/commands/commands.dart';
 import 'package:shorebird_cli/src/config/config.dart';
 import 'package:shorebird_cli/src/doctor.dart';
 import 'package:shorebird_cli/src/extensions/arg_results.dart';
 import 'package:shorebird_cli/src/logger.dart';
+import 'package:shorebird_cli/src/platform/platform.dart';
 import 'package:shorebird_cli/src/shorebird_artifact_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_build_mixin.dart';
 import 'package:shorebird_cli/src/shorebird_env.dart';
@@ -18,9 +20,6 @@ import 'package:shorebird_cli/src/shorebird_flutter.dart';
 import 'package:shorebird_cli/src/shorebird_validator.dart';
 import 'package:shorebird_cli/src/validators/validators.dart';
 import 'package:shorebird_code_push_client/shorebird_code_push_client.dart';
-
-const exportMethodArgName = 'export-method';
-const exportOptionsPlistArgName = 'export-options-plist';
 
 /// {@template release_ios_command}
 /// `shorebird release ios`
@@ -67,7 +66,7 @@ class ReleaseIosCommand extends ShorebirdCommand
       ..addFlag(
         'force',
         abbr: 'f',
-        help: 'Release without confirmation if there are no errors.',
+        help: ReleaseCommand.forceHelpText,
         negatable: false,
       );
   }
@@ -101,6 +100,14 @@ make smaller updates to your app.
       return e.exitCode.code;
     }
 
+    final force = results['force'] == true;
+    if (force) {
+      logger
+        ..err(ReleaseCommand.forceDeprecationErrorMessage)
+        ..info(ReleaseCommand.forceDeprecationExplanation);
+      return ExitCode.usage.code;
+    }
+
     if (results.rest.contains('--obfuscate')) {
       // Obfuscated releases break patching, so we don't support them.
       // See https://github.com/shorebirdtech/shorebird/issues/1619
@@ -123,30 +130,12 @@ make smaller updates to your app.
         );
     }
 
-    final exportPlistArg = results[exportOptionsPlistArgName] as String?;
-    if (exportPlistArg != null && results.wasParsed(exportMethodArgName)) {
-      logger.err(
-        '''Cannot specify both --$exportMethodArgName and --$exportOptionsPlistArgName.''',
-      );
+    final File exportOptionsPlist;
+    try {
+      exportOptionsPlist = ios.exportOptionsPlistFromArgs(results);
+    } catch (error) {
+      logger.err('$error');
       return ExitCode.usage.code;
-    }
-
-    final File? exportOptionsPlist;
-    if (exportPlistArg != null) {
-      exportOptionsPlist = File(exportPlistArg);
-      try {
-        _validateExportOptionsPlist(exportOptionsPlist);
-      } catch (error) {
-        logger.err('$error');
-        return ExitCode.usage.code;
-      }
-    } else if (results.wasParsed(exportMethodArgName)) {
-      final exportMethod = ExportMethod.values.firstWhere(
-        (element) => element.argName == results[exportMethodArgName] as String,
-      );
-      exportOptionsPlist = createExportOptionsPlist(exportMethod: exportMethod);
-    } else {
-      exportOptionsPlist = null;
     }
 
     const releasePlatform = ReleasePlatform.ios;
@@ -290,8 +279,7 @@ ${styleBold.wrap(lightGreen.wrap('🚀 Ready to create a new release!'))}
 ${summary.join('\n')}
 ''');
 
-        final force = results['force'] == true;
-        final needConfirmation = !force && !shorebirdEnv.isRunningOnCI;
+        final needConfirmation = !shorebirdEnv.isRunningOnCI;
         if (needConfirmation) {
           final confirm = logger.confirm('Would you like to continue?');
 
@@ -376,26 +364,5 @@ ${styleBold.wrap('Make sure to uncheck "Manage Version and Build Number", or els
         shorebirdEnvRef.overrideWith(() => releaseFlutterShorebirdEnv),
       },
     );
-  }
-
-  /// Verifies that [exportOptionsPlistFile] exists and sets
-  /// manageAppVersionAndBuildNumber to false, which prevents Xcode from
-  /// changing the version number out from under us.
-  ///
-  /// Throws an exception if validation fails, exits normally if validation
-  /// succeeds.
-  void _validateExportOptionsPlist(File exportOptionsPlistFile) {
-    if (!exportOptionsPlistFile.existsSync()) {
-      throw Exception(
-        '''Export options plist file ${exportOptionsPlistFile.path} does not exist''',
-      );
-    }
-
-    final plist = Plist(file: exportOptionsPlistFile);
-    if (plist.properties['manageAppVersionAndBuildNumber'] != false) {
-      throw Exception(
-        '''Export options plist ${exportOptionsPlistFile.path} does not set manageAppVersionAndBuildNumber to false. This is required for shorebird to work.''',
-      );
-    }
   }
 }
